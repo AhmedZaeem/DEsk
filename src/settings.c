@@ -223,8 +223,9 @@ static const char *const INK_VALS[] = { "faded", "normal", "dark", "darkest" };
 static const char *const CLOCK_WORDS[] = { "24-hour", "12-hour", NULL };
 static const char *const CLOCK_VALS[] = { "24h", "12h" };
 /* what the desk is made of (shell.conf desk_wood, desk_stain) */
-static const char *const WOOD_WORDS[] = { "Walnut", "Oak", "Cherry", "Maple", "Ebony", NULL };
-static const char *const WOOD_VALS[] = { "walnut", "oak", "cherry", "maple", "ebony" };
+static const char *const WOOD_WORDS[] = { "Walnut", "Oak", "Cherry", "Maple", "Ebony", "Negoro",
+	NULL };
+static const char *const WOOD_VALS[] = { "walnut", "oak", "cherry", "maple", "ebony", "negoro" };
 static const char *const STAIN_WORDS[] = { "Natural", "Honey", "Brown", "Dark brown", "Grey", NULL };
 static const char *const STAIN_VALS[] = { "natural", "honey", "brown", "dark", "grey" };
 /* the mat on the desk (shell.conf desk_mat, desk_mat_size) */
@@ -1209,7 +1210,7 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   night_strength = light | normal | strong | strongest   how warm NIGHT makes it\n"
 			"#   auto_rotate = yes | no             the built-in screen turned the way it is held\n"
 			"#   clock = 24h | 12h\n"
-			"#   desk_wood = walnut | oak | cherry | maple | ebony   what the desk is made of\n"
+			"#   desk_wood = walnut | oak | cherry | maple | ebony | negoro   what the desk is made of\n"
 			"#   desk_stain = natural | honey | brown | dark | grey   over its wood\n"
 			"#                                      (ebony: not brown or dark)\n"
 			"#   desk_mat = none | green | navy | burgundy | charcoal | cream | #rrggbb | leather\n"

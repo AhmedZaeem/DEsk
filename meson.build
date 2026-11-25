@@ -68,6 +68,8 @@ foreach spec : [
   # power (wlopm): wlr-protocols, which wayland-protocols does not carry,
   # kept in protocols/ -- wlroots' own header for the power one includes it
   ['wlr-output-management-unstable-v1-protocol.h', 'protocols/wlr-output-management-unstable-v1.xml'],
+  # bars, launchers and notices over the desk (Red Ronin: layer-shell)
+  ['wlr-layer-shell-unstable-v1-protocol.h', 'protocols/wlr-layer-shell-unstable-v1.xml'],
   ['wlr-output-power-management-unstable-v1-protocol.h',
     'protocols/wlr-output-power-management-unstable-v1.xml'],
 ]
@@ -238,7 +240,7 @@ executable('desk-preview',
 )
 
 wm_sources = proto_headers + ['src/wm.c', 'src/touch.c', 'src/things.c', 'src/thing-phone.c', 'src/thing-notebook.c', 'src/thing-calc.c', 'src/thing-keyboard.c', 'src/thing-mat.c', 'src/thing-clipboard.c', 'src/clips.c', 'src/handwriting.c', 'src/power.c', 'src/session.c', 'src/lock.c', 'src/orient.c',
-  'src/camera.c', 'src/occasion.c', 'src/cards.c', 'src/rec.c']
+  'src/camera.c', 'src/occasion.c', 'src/cards.c', 'src/rec.c', 'src/tile.c']
 wm_deps = [wlroots, wayland_server, xkbcommon, cairo, fontconfig, freetype, pixman, libdrm, math, threads]
 # the screen lock checks the password as login does
 pam = dependency('pam', required: false)
@@ -529,6 +531,12 @@ test('handwriting', executable('handwriting-test', ['tests/handwriting-test.c', 
   dependencies: [cairo, fontconfig, freetype, math, threads],
   install: false,
 ), timeout: 120)
+# and sheets are laid out, found and bound as they should be (tests/tile-test.c)
+test('tile', executable('tile-test', ['tests/tile-test.c', 'src/tile.c'],
+  include_directories: include_directories('include'),
+  dependencies: [xkbcommon, math],
+  install: false,
+))
 # and the calculator works out what it should (tests/calc-test.c)
 test('calc', executable('calc-test', ['tests/calc-test.c', 'src/calc.c'],
   include_directories: include_directories('include'),

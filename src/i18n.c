@@ -600,6 +600,7 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 	{ "Cherry", "チェリー", "樱桃木", "체리", "Cerezo", "Merisier", "Kirsche" },
 	{ "Maple", "メープル", "枫木", "메이플", "Arce", "Érable", "Ahorn" },
 	{ "Ebony", "黒檀", "乌木", "흑단", "Ébano", "Ébène", "Ebenholz" },
+	{ "Negoro", "根来塗", "根来涂", "네고로 칠", "Laca negoro", "Laque negoro", "Negoro-Lack" },
 	{ "Leather", "革", "皮革", "가죽", "Cuero", "Cuir", "Leder" },
 	{ "Linoleum", "リノリウム", "油毡", "리놀륨", "Linóleo", "Linoléum", "Linoleum" },
 	{ "Colour", "色", "颜色", "색", "Color", "Couleur", "Farbe" },

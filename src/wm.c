@@ -43,6 +43,9 @@
 #include "thing.h"
 #include "looks.h"
 #include "touch.h"
+/* laying sheets out side by side, the stacks, and key binds (Red Ronin) */
+#include "tile.h"
+#include <wlr/types/wlr_layer_shell_v1.h>
 /* What a letter is, bus or no bus: without one the box is simply empty. */
 #include "post.h"
 #include "ime.h"
@@ -76,7 +79,10 @@
 #include <strings.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -317,6 +323,7 @@ struct shell_conf {
 		char id[96];
 		bool paper;
 	} apps[64];                 /* and one program the other way */
+	struct tile_conf tile;      /* tiling, the stacks and key binds (tile.h) */
 	bool loaded, there;
 	time_t mtime;
 	long mtime_ns;
@@ -431,6 +438,9 @@ struct desk_output {
 	struct wl_list link;
 	struct desk_server *server;
 	struct wlr_output *wlr_output;
+	/* what layer-shell surfaces leave of it (their exclusive zones) */
+	struct wlr_box ls_usable;
+	bool ls_has;
 	struct wl_listener frame;
 	struct wl_listener request_state;
 	struct wl_listener destroy;
@@ -498,6 +508,20 @@ struct desk_toplevel {
 	 * right, 0 neither; and where it was before, and how big, to go back */
 	int half;
 	int half_x, half_y, half_inner_w, half_inner_h;
+	/* The stacks and the tiling ("laying the sheets out"): the stack it is
+	 * in (1..10; 0 not yet put in one), and on every stack; kept out of the
+	 * tiling, or laid out by it now, and where it comes in its order; where
+	 * it was before the tiling took it (outer, on the screen) */
+	int ws;
+	bool pinned;
+	bool floating, tiled, tile_mark;
+	unsigned tile_seq;
+	bool tile_was_set;
+	struct wlr_box tile_was;
+	/* put out of sight with its stack: what it and its folded packet were
+	 * before, to be as they were when the stack comes back */
+	bool ws_hidden, ws_had_tree, ws_had_sheet;
+	struct wlr_scene_tree *ws_sheet_tree;
 	/* its bottom edge lifted off the drawer's pull (view_peek): how tall
 	 * it was, and how tall it was made; 0, not lifted */
 	int peek_inner_h, peek_to_h;
@@ -1891,6 +1915,30 @@ struct desk_server {
 	int cad_n;
 	double cad_at;
 	struct wl_event_source *cad_timer;
+	/* The stacks and the tiling (tile.h, "laying the sheets out"): the
+	 * stack on the desk and the one before it; whether the sheets are laid
+	 * out now, how, and what they were last laid out for; the order sheets
+	 * came in; and the control socket desk-ctl speaks to */
+	int ws, ws_back;
+	bool tiling, tile_any;
+	enum tile_layout tile_layout;
+	double tile_ratio, tile_gap_pt;
+	uint64_t tile_sig;
+	unsigned tile_seq;
+	int ctl_fd;
+	struct wl_event_source *ctl_src;
+	char ctl_path[108];
+	/* layer-shell ("layer-shell: bars, launchers ..."): the four layers'
+	 * trees, the surfaces, the one with the keys, whether the pointer is on
+	 * one, and what the screens were last arranged for */
+	struct wlr_layer_shell_v1 *layer_shell;
+	struct wl_listener new_layer_surface;
+	struct wlr_scene_tree *ls_layer[4];
+	struct wl_list layers;
+	struct wlr_surface *ls_focus;
+	bool ls_pointer;
+	bool ls_btn;                /* a button went down on one, and is still down */
+	uint64_t ls_outputs_sig;
 };
 
 /* Started and let go of. Forked twice, so that what runs is not a child of
@@ -2423,6 +2471,10 @@ static bool pointer_on_side(struct desk_server *server);
 static void things_text_wanted(struct desk_server *server, bool wanted);
 static void room_update(struct desk_server *server);
 
+/* layer-shell ("layer-shell: bars, launchers ...") */
+static bool ls_holds_keys(struct desk_server *server);
+static void ls_keys(struct desk_server *server);
+
 /* The pointer's picture: none while fingers are at work. */
 static void cursor_image(struct desk_server *server, const char *name)
 {
@@ -2766,6 +2818,11 @@ static void view_set_activated(struct desk_toplevel *view, bool on)
 /* Does it take the keyboard at all? An X window can say it never does. */
 static bool view_takes_keys(const struct desk_toplevel *view)
 {
+	/* not a sheet in a stack that is put away (the drawer is every stack's) */
+	if (view->ws && !view->pinned && !view->sheet.in_drawer && view->server
+		&& view->ws != view->server->ws) {
+		return false;
+	}
 #ifdef DESK_HAVE_XWAYLAND
 	if (view->xsurface) {
 		return wlr_xwayland_icccm_input_model(view->xsurface) != WLR_ICCCM_INPUT_MODEL_NONE;
@@ -9333,8 +9390,7 @@ static int end_timer_cb(void *data)
 	if (console_up(server)) {
 		console_toggle(server);
 	}
-	struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
-	focus_toplevel(view);
+	focus_next(server);
 	server_schedule_frames(server);
 	return 0;
 }
@@ -12187,6 +12243,7 @@ static char *conf_trim(char *s)
 
 static void shell_conf_defaults(struct shell_conf *c)
 {
+	tile_conf_defaults(&c->tile);
 	for (int i = 0; i < DESK_STD_COUNT; i++) {
 		desk_apps_set_std(i, "");
 	}
@@ -12242,6 +12299,13 @@ static void shell_conf_defaults(struct shell_conf *c)
 /* The settings that are not yes or no. False if the key is not one. */
 static bool conf_other(struct shell_conf *c, const char *path, const char *key, const char *val)
 {
+	char why[200];
+	if (tile_conf_key(&c->tile, key, val, why, sizeof why)) {
+		if (why[0]) {
+			wlr_log(WLR_ERROR, "%s: %s", path, why);
+		}
+		return true;
+	}
 	if (!strcmp(key, "termites_wait")) {
 		int sec = atoi(val);
 		if (sec == 30 || sec == 60 || sec == 120 || sec == 300) {
@@ -12595,8 +12659,13 @@ static void shell_conf_load(struct shell_conf *c)
 	/* a stain not made for the wood (desk_stain_offered): natural, as the
 	 * desk is drawn, so that it is no change to trace the room again for */
 	if (!desk_stain_offered(c->desk_wood, c->desk_stain)) {
-		wlr_log(WLR_INFO, "shell settings: ebony is not stained brown or dark brown; natural");
+		wlr_log(WLR_INFO, "shell settings: %s is not stained brown or dark brown; natural",
+			c->desk_wood == DESK_WOOD_NEGORO ? "negoro" : "ebony");
 		c->desk_stain = DESK_STAIN_NATURAL;
+	}
+	/* the Red Ronin keys under the file's own */
+	if (c->tile.binds_default) {
+		tile_binds_redronin(&c->tile);
 	}
 }
 
@@ -12858,6 +12927,8 @@ static int gfx_wanted(const struct desk_server *server)
 }
 
 /* Once a second: read again if it has changed since it was last read. */
+static void tile_conf_applied(struct desk_server *server, const struct tile_conf *was);
+
 static void shell_conf_poll(struct desk_server *server)
 {
 	char path[512];
@@ -12876,6 +12947,7 @@ static void shell_conf_poll(struct desk_server *server)
 		c->size = st.st_size;
 	}
 	bool first = !c->loaded;
+	struct tile_conf tile_was_conf = c->tile;
 	enum desk_lang was = desk_lang_get();
 	double night_was = c->night;
 	bool rotate_was = c->auto_rotate;
@@ -12891,6 +12963,7 @@ static void shell_conf_poll(struct desk_server *server)
 		server_schedule_frames(server);
 	}
 	c->loaded = true;
+	tile_conf_applied(server, first ? NULL : &tile_was_conf);
 	idle_rearm(server);
 	desk_sound_set_level(c->sound);
 	enum desk_lang lang = desk_lang_parse(c->language);
@@ -14392,6 +14465,11 @@ static struct desk_sheet *parked_sheet_at(struct desk_server *server, double px,
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
 		struct desk_sheet *s = &view->sheet;
+		/* (not a packet of a stack put away) */
+		if (view->ws_hidden || (view->ws && !view->pinned && !s->in_drawer
+				&& view->ws != server->ws)) {
+			continue;
+		}
 		if (!s->in_drawer && sheet_hit(s, x, y)
 			&& !(covered && s->tree && s->tree->node.parent == server->layer_folded)) {
 			return s;
@@ -15415,6 +15493,14 @@ void focus_toplevel(struct desk_toplevel *toplevel)
 	if (!surface || !toplevel->scene_tree) {
 		return;
 	}
+	/* a launcher up that keeps the keys: raised, but the keys stay its */
+	if (ls_holds_keys(server)) {
+		wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+		wl_list_remove(&toplevel->link);
+		wl_list_insert(&server->toplevels, &toplevel->link);
+		views_above_raise(server);
+		return;
+	}
 	/* to the front first: a click on the one that has the keys already
 	 * still brings it up over what was put down on it */
 	wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
@@ -15453,6 +15539,9 @@ void focus_toplevel(struct desk_toplevel *toplevel)
  * goes: or nobody, if nothing is left. A sheet folded away is not it. */
 void focus_next(struct desk_server *server)
 {
+	if (ls_holds_keys(server)) {
+		return;   /* a launcher keeps them (layer-shell) */
+	}
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
 		if (view->sheet.phase == SHEET_IDLE && view->scene_tree && view_takes_keys(view)) {
@@ -16085,6 +16174,22 @@ static struct wlr_box max_area(struct desk_server *server, struct wlr_output *ou
 	if (!screen_is_side(server, out) && h >= 8) {
 		wa.height = h - wa.y;
 	}
+	/* and clear of what a bar keeps clear (layer-shell) */
+	struct desk_output *o;
+	if (server->outputs.next) {
+		wl_list_for_each(o, &server->outputs, link) {
+			if (o->wlr_output == out && o->ls_has) {
+				/* (in the paper's coordinates, as wa is: the screen's less
+				 * where the drawer and the camera have moved the paper) */
+				struct wlr_box u = o->ls_usable, in;
+				u.x -= server->desk_dx;
+				u.y -= server->desk_dy + server->win_dy;
+				if (wlr_box_intersection(&in, &wa, &u)) {
+					wa = in;
+				}
+			}
+		}
+	}
 	return wa;
 }
 
@@ -16263,6 +16368,10 @@ static void windows_keep_off_tray(struct desk_server *server)
 	struct desk_toplevel *view;
 	wl_list_for_each(view, &server->toplevels, link) {
 		if (!view->scene_tree || view->fullscreen || view->unmanaged) {
+			continue;
+		}
+		if (view->tiled) {
+			server->tile_sig = 0;   /* laid out again, for the area there is now */
 			continue;
 		}
 		struct wlr_scene_node *node = &view->scene_tree->node;
@@ -18658,6 +18767,10 @@ static void clock_publish(struct desk_server *server)
 	st.ime[0] = '\0';
 	desk_media_read(&st.media, st.now);
 #endif
+	/* the stack on the clock, once there is more than the one desk to be on */
+	const struct tile_conf *tc = &server->conf.tile;
+	st.ws = tc->style_redronin || tc->n_binds || server->tiling || server->ws != 1 ? server->ws : 0;
+	st.tiling = server->tiling;
 	desk_clock_set(&st);
 	clock_repaint(server);
 	/* and back when it will next come out different by itself */
@@ -21292,6 +21405,14 @@ static void begin_interactive(struct desk_toplevel *toplevel, enum desk_cursor_m
 		/* taken in hand on its way onto a half: there at once */
 		view_sizing_stop(toplevel);
 	}
+	/* pulled bigger or smaller by an edge: out of the tiling, floating at
+	 * the size it is pulled to ("laying the sheets out") */
+	if (mode == DESK_CUR_RESIZE && toplevel->tiled) {
+		toplevel->tiled = false;
+		toplevel->floating = true;
+		toplevel->tile_was_set = false;
+		server->tile_sig = 0;
+	}
 	server->grabbed = toplevel;
 	server->cursor_mode = mode;
 	if (mode == DESK_CUR_MOVE) {
@@ -22158,6 +22279,1617 @@ static void switcher_forget(struct desk_server *server, struct desk_toplevel *vi
 	}
 }
 
+/* ---- layer-shell: bars, launchers and notices that sit over the desk ----
+ *
+ * Added for Red Ronin OS: wlr-layer-shell, so that the programs Red Ronin's
+ * Hyprland session has -- rofi and fuzzel, waybar, swaync, a lock or a
+ * wallpaper -- run on the desk too. The desk itself is drawn under all of
+ * it, as it was: a program asks for one of four layers, and they are trees
+ * of their own in the scene, apart from the camera and the drawer:
+ *
+ *   background           over the traced room, under what stands on it
+ *   bottom               over the desk's things and folded sheets, under
+ *                        the windows
+ *   top                  over the windows, under one on the whole screen
+ *   overlay              over everything but the front door
+ *
+ * What one keeps clear (a bar's exclusive zone) is kept clear of windows:
+ * max_area gives what is left. Only the top two take the pointer, before
+ * anything of the desk's own does, and one that asks for the keys has them
+ * while it is up. */
+
+struct desk_layer {
+	struct wl_list link;
+	struct desk_server *server;
+	struct wlr_layer_surface_v1 *ls;
+	struct wlr_scene_layer_surface_v1 *scene;
+	struct wl_listener map, unmap, destroy, commit, new_popup;
+	bool mapped;
+};
+
+struct desk_layer_popup {
+	struct wlr_xdg_popup *popup;
+	struct wl_listener commit, destroy;
+};
+
+static struct wlr_scene_tree *ls_tree(struct desk_server *server, enum zwlr_layer_shell_v1_layer l)
+{
+	switch (l) {
+	case ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND:
+		return server->ls_layer[0];
+	case ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM:
+		return server->ls_layer[1];
+	case ZWLR_LAYER_SHELL_V1_LAYER_TOP:
+		return server->ls_layer[2];
+	case ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY:
+	default:
+		return server->ls_layer[3];
+	}
+}
+
+static bool ls_output_alive(struct desk_server *server, struct wlr_output *out)
+{
+	struct desk_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (o->wlr_output == out) {
+			/* (a screen gone dark is still there: its bar stays) */
+			return true;
+		}
+	}
+	return false;
+}
+
+/* each screen's surfaces placed, the overlay's first, and what they keep
+ * clear taken off the screen for the windows */
+static void ls_arrange(struct desk_server *server)
+{
+	if (!server->outputs.next) {
+		return;
+	}
+	struct desk_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		struct wlr_box full;
+		wlr_output_layout_get_box(server->output_layout, o->wlr_output, &full);
+		o->ls_has = false;
+		if (wlr_box_empty(&full)) {
+			continue;
+		}
+		struct wlr_box usable = full;
+		for (int layer = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
+				layer >= ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND; layer--) {
+			struct desk_layer *l;
+			wl_list_for_each(l, &server->layers, link) {
+				if (l->ls->output != o->wlr_output || !l->ls->initialized
+					|| (int)l->ls->current.layer != layer) {
+					continue;
+				}
+				wlr_scene_layer_surface_v1_configure(l->scene, &full, &usable);
+			}
+		}
+		o->ls_usable = usable;
+		o->ls_has = usable.x != full.x || usable.y != full.y || usable.width != full.width
+			|| usable.height != full.height;
+	}
+	server->tile_sig = 0;
+	server_schedule_frames(server);
+}
+
+/* the keys to the topmost one that asks for them, or back to the windows */
+static void ls_keys(struct desk_server *server)
+{
+	struct desk_layer *want = NULL, *l;
+	wl_list_for_each(l, &server->layers, link) {
+		if (!l->mapped || l->ls->current.keyboard_interactive
+				== ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE
+			|| l->ls->current.layer < ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
+			continue;
+		}
+		if (!want || l->ls->current.layer > want->ls->current.layer
+			|| (l->ls->current.layer == want->ls->current.layer
+				&& l->ls->current.keyboard_interactive
+					== ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE)) {
+			want = l;
+		}
+	}
+	struct wlr_surface *had = server->seat->keyboard_state.focused_surface;
+	if (want) {
+		if (had == want->ls->surface || locked(server)) {
+			return;
+		}
+		struct desk_toplevel *was = view_of_surface(server, had);
+		if (was) {
+			view_set_activated(was, false);
+			view_repaint_chrome(was);
+		}
+		struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+		wlr_seat_keyboard_notify_enter(server->seat, want->ls->surface,
+			kb ? kb->keycodes : NULL, kb ? kb->num_keycodes : 0, kb ? &kb->modifiers : NULL);
+		server->ls_focus = want->ls->surface;
+		return;
+	}
+	if (server->ls_focus && had == server->ls_focus) {
+		server->ls_focus = NULL;
+		focus_next(server);
+	}
+	server->ls_focus = NULL;
+}
+
+static void ls_map(struct wl_listener *listener, void *data)
+{
+	struct desk_layer *l = wl_container_of(listener, l, map);
+	(void)data;
+	l->mapped = true;
+	ls_arrange(l->server);
+	ls_keys(l->server);
+}
+
+static void ls_unmap(struct wl_listener *listener, void *data)
+{
+	struct desk_layer *l = wl_container_of(listener, l, unmap);
+	(void)data;
+	l->mapped = false;
+	struct wlr_seat *seat = l->server->seat;
+	if (seat->pointer_state.focused_surface == l->ls->surface) {
+		wlr_seat_pointer_clear_focus(seat);
+		l->server->ls_pointer = false;
+		l->server->ls_btn = false;
+	}
+	ls_arrange(l->server);
+	ls_keys(l->server);
+}
+
+static void ls_commit(struct wl_listener *listener, void *data)
+{
+	struct desk_layer *l = wl_container_of(listener, l, commit);
+	(void)data;
+	struct wlr_layer_surface_v1 *ls = l->ls;
+	if (!ls->initialized) {
+		return;
+	}
+	uint32_t c = ls->current.committed;
+	if (ls->initial_commit || c) {
+		if (c & WLR_LAYER_SURFACE_V1_STATE_LAYER) {
+			wlr_scene_node_reparent(&l->scene->tree->node, ls_tree(l->server, ls->current.layer));
+		}
+		ls_arrange(l->server);
+	}
+	if (c & (WLR_LAYER_SURFACE_V1_STATE_KEYBOARD_INTERACTIVITY | WLR_LAYER_SURFACE_V1_STATE_LAYER)) {
+		ls_keys(l->server);
+	}
+}
+
+static void ls_destroy(struct wl_listener *listener, void *data)
+{
+	struct desk_layer *l = wl_container_of(listener, l, destroy);
+	(void)data;
+	struct desk_server *server = l->server;
+	wl_list_remove(&l->link);
+	wl_list_remove(&l->map.link);
+	wl_list_remove(&l->unmap.link);
+	wl_list_remove(&l->destroy.link);
+	wl_list_remove(&l->commit.link);
+	wl_list_remove(&l->new_popup.link);
+	if (server->ls_focus == l->ls->surface) {
+		server->ls_focus = NULL;
+	}
+	free(l);
+	ls_arrange(server);
+	ls_keys(server);
+}
+
+static void ls_popup_commit(struct wl_listener *listener, void *data)
+{
+	struct desk_layer_popup *p = wl_container_of(listener, p, commit);
+	(void)data;
+	if (p->popup->base->initial_commit) {
+		/* kept on its screen (in the popup's parent's coordinates) */
+		struct wlr_layer_surface_v1 *ls = p->popup->parent
+			? wlr_layer_surface_v1_try_from_wlr_surface(p->popup->parent) : NULL;
+		struct desk_layer *l = ls ? ls->data : NULL;
+		if (l && l->scene && ls->output) {
+			struct wlr_box ob;
+			int lx, ly;
+			wlr_output_layout_get_box(l->server->output_layout, ls->output, &ob);
+			wlr_scene_node_coords(&l->scene->tree->node, &lx, &ly);
+			ob.x -= lx;
+			ob.y -= ly;
+			wlr_xdg_popup_unconstrain_from_box(p->popup, &ob);
+		}
+		wlr_xdg_surface_schedule_configure(p->popup->base);
+	}
+}
+
+static void ls_popup_destroy(struct wl_listener *listener, void *data)
+{
+	struct desk_layer_popup *p = wl_container_of(listener, p, destroy);
+	(void)data;
+	wl_list_remove(&p->commit.link);
+	wl_list_remove(&p->destroy.link);
+	free(p);
+}
+
+/* a bar's menu or tooltip: on the bar, where it says (its own popups then
+ * go through the desk's, which find this one's tree in its data) */
+static void ls_new_popup(struct wl_listener *listener, void *data)
+{
+	struct desk_layer *l = wl_container_of(listener, l, new_popup);
+	struct wlr_xdg_popup *popup = data;
+	struct desk_layer_popup *p = calloc(1, sizeof *p);
+	if (!p) {
+		return;
+	}
+	p->popup = popup;
+	popup->base->data = wlr_scene_xdg_surface_create(l->scene->tree, popup->base);
+	p->commit.notify = ls_popup_commit;
+	wl_signal_add(&popup->base->surface->events.commit, &p->commit);
+	p->destroy.notify = ls_popup_destroy;
+	wl_signal_add(&popup->events.destroy, &p->destroy);
+}
+
+static void ls_new_surface(struct wl_listener *listener, void *data)
+{
+	struct desk_server *server = wl_container_of(listener, server, new_layer_surface);
+	struct wlr_layer_surface_v1 *ls = data;
+	if (!ls->output) {
+		/* the screen the pointer is on, else the desk's */
+		struct wlr_output *out = wlr_output_layout_output_at(server->output_layout,
+			server->cursor->x, server->cursor->y);
+		ls->output = out ? out : first_output(server);
+	}
+	if (!ls->output || locked(server)) {
+		wlr_layer_surface_v1_destroy(ls);
+		return;
+	}
+	struct desk_layer *l = calloc(1, sizeof *l);
+	if (!l) {
+		wlr_layer_surface_v1_destroy(ls);
+		return;
+	}
+	l->server = server;
+	l->ls = ls;
+	l->scene = wlr_scene_layer_surface_v1_create(ls_tree(server, ls->pending.layer), ls);
+	if (!l->scene) {
+		free(l);
+		wlr_layer_surface_v1_destroy(ls);
+		return;
+	}
+	ls->data = l;
+	l->map.notify = ls_map;
+	wl_signal_add(&ls->surface->events.map, &l->map);
+	l->unmap.notify = ls_unmap;
+	wl_signal_add(&ls->surface->events.unmap, &l->unmap);
+	l->commit.notify = ls_commit;
+	wl_signal_add(&ls->surface->events.commit, &l->commit);
+	l->destroy.notify = ls_destroy;
+	wl_signal_add(&ls->events.destroy, &l->destroy);
+	l->new_popup.notify = ls_new_popup;
+	wl_signal_add(&ls->events.new_popup, &l->new_popup);
+	wl_list_insert(&server->layers, &l->link);
+	wlr_log(WLR_INFO, "a layer surface comes over the desk: %s on %s",
+		ls->namespace ? ls->namespace : "-", ls->output->name);
+}
+
+/* surfaces on screens gone: closed, as the protocol has it */
+static void ls_outputs_changed(struct desk_server *server)
+{
+	struct desk_layer *l, *tmp;
+	wl_list_for_each_safe(l, tmp, &server->layers, link) {
+		if (!ls_output_alive(server, l->ls->output)) {
+			wlr_layer_surface_v1_destroy(l->ls);
+		}
+	}
+	ls_arrange(server);
+}
+
+/* The layer surface under the pointer, if what is on top there is one of
+ * the bottom, top or overlay layer's (not the background's: the desk is
+ * clicked through a wallpaper), and where in it. Hit through the whole
+ * scene, so that one covered -- by a window on the whole screen, the
+ * drawer, a view -- is not found. */
+static bool ls_tree_has(struct desk_server *server, struct wlr_scene_node *n)
+{
+	for (; n; n = n->parent ? &n->parent->node : NULL) {
+		for (int i = 1; i < 4; i++) {
+			if (server->ls_layer[i] && n == &server->ls_layer[i]->node) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static struct wlr_surface *ls_surface_at(struct desk_server *server, double lx, double ly,
+	double *sx, double *sy)
+{
+	struct wlr_scene_node *n = wlr_scene_node_at(&server->scene->tree.node, lx, ly, sx, sy);
+	if (!n || n->type != WLR_SCENE_NODE_BUFFER || !ls_tree_has(server, n)) {
+		return NULL;
+	}
+	struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(n));
+	return ss ? ss->surface : NULL;
+}
+
+/* where the surface the pointer is held on is, to tell it where the pointer
+ * is while a button is down there */
+static bool ls_held_at(struct desk_server *server, double *sx, double *sy)
+{
+	struct wlr_surface *s = server->seat->pointer_state.focused_surface;
+	struct desk_layer *l;
+	wl_list_for_each(l, &server->layers, link) {
+		if (l->ls->surface == s && l->mapped) {
+			int x, y;
+			wlr_scene_node_coords(&l->scene->tree->node, &x, &y);
+			*sx = server->cursor->x - x;
+			*sy = server->cursor->y - y;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* The pointer over a bar or a launcher: theirs, before the desk's. true when
+ * it was. A button held down stays with what it was pressed on: a drag out
+ * of a window over a bar is the window's, and one from a bar the bar's. */
+static bool ls_pointer_motion(struct desk_server *server, uint32_t time)
+{
+	if (wl_list_empty(&server->layers) || server->cursor_mode != DESK_CUR_PASSTHROUGH) {
+		return false;
+	}
+	double sx, sy;
+	if (server->ls_btn) {
+		if (ls_held_at(server, &sx, &sy)) {
+			wlr_seat_pointer_notify_motion(server->seat, time, sx, sy);
+		}
+		return true;
+	}
+	if (server->seat->pointer_state.button_count > 0) {
+		return false;
+	}
+	struct wlr_surface *s = ls_surface_at(server, server->cursor->x, server->cursor->y, &sx, &sy);
+	if (!s) {
+		return false;
+	}
+	if (!server->ls_pointer) {
+		cursor_image(server, "default");
+	}
+	server->ls_pointer = true;
+	wlr_seat_pointer_notify_enter(server->seat, s, sx, sy);
+	wlr_seat_pointer_notify_motion(server->seat, time, sx, sy);
+	return true;
+}
+
+static bool ls_pointer_button(struct desk_server *server, struct wlr_pointer_button_event *e)
+{
+	if (wl_list_empty(&server->layers) || server->cursor_mode != DESK_CUR_PASSTHROUGH) {
+		return false;
+	}
+	if (e->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+		if (!server->ls_btn) {
+			return false;
+		}
+		wlr_seat_pointer_notify_button(server->seat, e->time_msec, e->button, e->state);
+		if (server->seat->pointer_state.button_count == 0) {
+			server->ls_btn = false;
+		}
+		return true;
+	}
+	double sx, sy;
+	struct wlr_surface *s = ls_surface_at(server, server->cursor->x, server->cursor->y, &sx, &sy);
+	if (!s) {
+		return false;
+	}
+	/* one that takes the keys when asked has them on a click */
+	struct wlr_layer_surface_v1 *ls = wlr_layer_surface_v1_try_from_wlr_surface(s);
+	if (ls && ls->current.keyboard_interactive != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE
+		&& server->seat->keyboard_state.focused_surface != s && !locked(server)) {
+		struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+		wlr_seat_keyboard_notify_enter(server->seat, s, kb ? kb->keycodes : NULL,
+			kb ? kb->num_keycodes : 0, kb ? &kb->modifiers : NULL);
+		server->ls_focus = s;
+	}
+	wlr_seat_pointer_notify_enter(server->seat, s, sx, sy);
+	wlr_seat_pointer_notify_button(server->seat, e->time_msec, e->button, e->state);
+	server->ls_btn = true;
+	return true;
+}
+
+static bool ls_pointer_axis(struct desk_server *server, struct wlr_pointer_axis_event *e)
+{
+	if (wl_list_empty(&server->layers) || server->cursor_mode != DESK_CUR_PASSTHROUGH
+		|| server->ls_btn || server->seat->pointer_state.button_count > 0) {
+		return false;
+	}
+	double sx, sy;
+	struct wlr_surface *s = ls_surface_at(server, server->cursor->x, server->cursor->y, &sx, &sy);
+	if (!s) {
+		return false;
+	}
+	wlr_seat_pointer_notify_enter(server->seat, s, sx, sy);
+	wlr_seat_pointer_notify_axis(server->seat, e->time_msec, e->orientation, e->delta,
+		e->delta_discrete, e->source, e->relative_direction);
+	return true;
+}
+
+/* A launcher up that keeps the keys to itself (exclusive): nothing of the
+ * desk's may take them from it while it is */
+static bool ls_holds_keys(struct desk_server *server)
+{
+	if (!server->layers.next) {
+		return false;
+	}
+	struct desk_layer *l;
+	wl_list_for_each(l, &server->layers, link) {
+		if (l->mapped && l->ls->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP
+			&& l->ls->current.keyboard_interactive
+				== ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE
+			&& server->seat->keyboard_state.focused_surface == l->ls->surface) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void ls_start(struct desk_server *server)
+{
+	wl_list_init(&server->layers);
+	/* in the scene: over the room, under what stands on the desk; over the
+	 * windows, under one on the whole screen; and over all but the door.
+	 * (The bottom layer is over what stands on the desk, under the sheets:
+	 * a bar there is seen, and found where no sheet lies over it.) */
+	for (int i = 0; i < 4; i++) {
+		server->ls_layer[i] = wlr_scene_tree_create(&server->scene->tree);
+	}
+	wlr_scene_node_place_above(&server->ls_layer[0]->node, &server->layer_bg->node);
+	wlr_scene_node_place_above(&server->ls_layer[1]->node, &server->layer_folded->node);
+	wlr_scene_node_place_above(&server->ls_layer[2]->node, &server->layer_win->node);
+	wlr_scene_node_place_below(&server->ls_layer[3]->node, &server->layer_lock->node);
+	server->layer_shell = wlr_layer_shell_v1_create(server->wl_display, 4);
+	server->new_layer_surface.notify = ls_new_surface;
+	wl_signal_add(&server->layer_shell->events.new_surface, &server->new_layer_surface);
+}
+
+/* ---- laying the sheets out: tiling, the stacks, key binds -------------
+ *
+ * Added for Red Ronin OS (docs/TILING.md). Everything here is off until
+ * shell.conf asks for it: with no tiling, bind or bind_defaults key the desk
+ * is the desk as made, but for the stacks, which are there and cost nothing
+ * until a second one is used.
+ *
+ * The stacks (workspaces): every sheet is in one of ten, the one the desk
+ * was on when it came. Changing stack puts the others' sheets out of sight
+ * -- their nodes, and their folded packets -- and brings the new one's back
+ * as they were. Sheets put away in the drawer are every stack's. What other
+ * code does to a sheet out of sight (a packet painted again) is undone at
+ * the next frame (ws_enforce), and remembered for when it comes back.
+ *
+ * Tiling: on each screen, the sheets of the stack on the desk that are open,
+ * not on the whole screen, not opened out, not dialogs and not things are
+ * laid out (tile_arrange) in the order they came, gliding there as a sheet
+ * laid on a half does. What they are laid out for is hashed each frame, so
+ * a sheet coming, going, folding or moving screen lays them out again
+ * without each of those having to say so. A sheet picked up and moved, or
+ * pulled bigger by an edge, leaves the tiling and floats.
+ *
+ * Key binds (shell.conf bind = KEYS ACTION) are tried before the desk's own
+ * keys, so a bind can take one of those over; the same actions come down
+ * the control socket (desk-ctl do ACTION), which is how they are tested. */
+
+static bool tile_ws_here(const struct desk_toplevel *v)
+{
+	return v->ws == 0 || v->pinned || v->sheet.in_drawer || v->ws == v->server->ws;
+}
+
+static struct wlr_box tile_box_of(const struct desk_toplevel *v)
+{
+	return (struct wlr_box){ v->scene_tree->node.x, v->scene_tree->node.y, v->outer_w,
+		v->outer_h };
+}
+
+/* put out of sight, or brought back, as its stack is */
+static void ws_enforce(struct desk_server *server)
+{
+	struct desk_toplevel *v;
+	wl_list_for_each(v, &server->toplevels, link) {
+		if (!v->scene_tree || v->unmanaged || v->ime_popup) {
+			continue;
+		}
+		/* in the drawer, every stack's: taken out, it is this one's */
+		if (v->sheet.in_drawer && !v->pinned) {
+			v->ws = server->ws;
+		}
+		struct wlr_scene_node *n = &v->scene_tree->node;
+		struct wlr_scene_tree *st = v->sheet.tree;
+		if (tile_ws_here(v)) {
+			if (v->ws_hidden) {
+				v->ws_hidden = false;
+				wlr_scene_node_set_enabled(n, v->ws_had_tree);
+				if (st) {
+					/* (a packet made while it was away was made to be seen) */
+					wlr_scene_node_set_enabled(&st->node, st != v->ws_sheet_tree || v->ws_had_sheet);
+				}
+				v->ws_sheet_tree = NULL;
+			}
+			continue;
+		}
+		if (!v->ws_hidden) {
+			/* not in the middle of folding or opening out: after */
+			if (v->sheet.phase == SHEET_FOLDING || v->sheet.phase == SHEET_UNFOLDING || v->ua_on) {
+				continue;
+			}
+			v->ws_hidden = true;
+			v->ws_had_tree = n->enabled;
+			v->ws_sheet_tree = st;
+			v->ws_had_sheet = st && st->node.enabled;
+			wlr_scene_node_set_enabled(n, false);
+			if (st) {
+				wlr_scene_node_set_enabled(&st->node, false);
+			}
+			continue;
+		}
+		if (n->enabled) {
+			v->ws_had_tree = true;
+			wlr_scene_node_set_enabled(n, false);
+		}
+		if (st && st != v->ws_sheet_tree) {
+			v->ws_sheet_tree = st;
+			v->ws_had_sheet = st->node.enabled;
+			wlr_scene_node_set_enabled(&st->node, false);
+		} else if (st && st->node.enabled) {
+			v->ws_had_sheet = true;
+			wlr_scene_node_set_enabled(&st->node, false);
+		}
+	}
+}
+
+static void tile_view_mapped(struct desk_toplevel *v)
+{
+	struct desk_server *server = v->server;
+	v->ws = server->ws > 0 ? server->ws : 1;
+	v->ws_hidden = false;
+	v->tiled = false;
+	v->tile_was_set = false;
+	v->tile_seq = ++server->tile_seq;
+	server->tile_sig = 0;
+}
+
+/* a dialog, or one that will be only the one size: left floating */
+static bool tile_dialog(const struct desk_toplevel *v)
+{
+#ifdef DESK_HAVE_XWAYLAND
+	if (v->xsurface) {
+		const struct wlr_xwayland_surface *xs = v->xsurface;
+		if (xs->parent || xs->modal) {
+			return true;
+		}
+		const xcb_size_hints_t *h = xs->size_hints;
+		return h && h->min_width > 0 && h->min_width == h->max_width
+			&& h->min_height > 0 && h->min_height == h->max_height;
+	}
+#endif
+	if (!v->xdg_toplevel) {
+		return true;
+	}
+	if (v->xdg_toplevel->parent) {
+		return true;
+	}
+	const struct wlr_xdg_toplevel_state *st = &v->xdg_toplevel->current;
+	return st->min_width > 0 && st->min_width == st->max_width && st->min_height > 0
+		&& st->min_height == st->max_height;
+}
+
+/* A program asking, of itself, for its window opened out while the sheets
+ * are tiled is told no, and the sheet is tiled: kitty does it when the size
+ * it remembers is more than there is, and a browser coming back from the
+ * whole screen does it. The keys (maximize) still open a sheet out. */
+static bool tile_declines_max(struct desk_toplevel *v, bool want)
+{
+	return want && !v->maximized && v->server->tiling && !v->floating && !v->pinned
+		&& !v->unmanaged && !view_thing(v) && !tile_dialog(v)
+		&& !view_refuses(v, THING_NO_HALF);
+}
+
+static bool tile_takes(struct desk_toplevel *v, struct wlr_output *out)
+{
+	if (!v->scene_tree || v->unmanaged || v->ime_popup || v->floating || v->pinned
+		|| v->ws_hidden || !tile_ws_here(v) || v->sheet.phase != SHEET_IDLE || v->sheet.in_drawer
+		|| v->fullscreen || v->maximized || v->above || view_thing(v) || v->ua_on
+		|| view_refuses(v, THING_NO_HALF) || !v->scene_tree->node.enabled) {
+		return false;
+	}
+	/* (held in the hand it stays: picked up and moved, tile_lift takes it
+	 * out; a click on its heading moves nothing) */
+	return view_screen(v) == out && !tile_dialog(v);
+}
+
+static void tile_put(struct desk_toplevel *v, struct wlr_box to)
+{
+	struct wlr_box at = tile_box_of(v);
+	if (at.x == to.x && at.y == to.y && at.width == to.width && at.height == to.height) {
+		return;
+	}
+	view_sizing_stop(v);
+	view_peek_forget(v);
+	view_glide_to(v, to);
+	if (!v->sz_glide) {
+		view_send_position(v);
+	}
+}
+
+/* every sheet out of the tiling; back where it was before, if asked */
+static void tile_release_all(struct desk_server *server, bool restore)
+{
+	struct desk_toplevel *v;
+	wl_list_for_each(v, &server->toplevels, link) {
+		if (!v->tiled) {
+			continue;
+		}
+		v->tiled = false;
+		if (restore && v->tile_was_set && v->scene_tree && !v->ws_hidden) {
+			tile_put(v, v->tile_was);
+		}
+		v->tile_was_set = false;
+	}
+	server->tile_any = false;
+	server->tile_sig = 0;
+}
+
+#define TILE_MIX(h, x) ((h) = ((h) ^ (uint64_t)(x)) * 1099511628211ull)
+
+static void tile_tick(struct desk_server *server)
+{
+	/* the screens changed: layer surfaces placed again, or closed */
+	if (server->layers.next) {
+		uint64_t os = 1469598103934665603ull;
+		struct desk_output *oo;
+		wl_list_for_each(oo, &server->outputs, link) {
+			struct wlr_box b;
+			wlr_output_layout_get_box(server->output_layout, oo->wlr_output, &b);
+			TILE_MIX(os, (uintptr_t)oo->wlr_output);
+			TILE_MIX(os, oo->wlr_output->enabled);
+			TILE_MIX(os, b.x);
+			TILE_MIX(os, b.y);
+			TILE_MIX(os, b.width);
+			TILE_MIX(os, b.height);
+		}
+		if (os != server->ls_outputs_sig) {
+			server->ls_outputs_sig = os;
+			ls_outputs_changed(server);
+		}
+	}
+	ws_enforce(server);
+	struct desk_toplevel *v;
+	if (!server->tiling) {
+		if (server->tile_any) {
+			tile_release_all(server, true);
+		}
+		return;
+	}
+	struct desk_toplevel *list[SWITCHER_MAX];
+	int counts[16];
+	struct wlr_box areas[16];
+	int nout = 0, n = 0;
+	uint64_t sig = 1469598103934665603ull;
+	TILE_MIX(sig, server->tile_layout);
+	TILE_MIX(sig, (int)lround(server->tile_ratio * 1000.0));
+	TILE_MIX(sig, (int)lround(server->tile_gap_pt * 10.0));
+	struct desk_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (nout >= 16 || !o->wlr_output || !o->wlr_output->enabled) {
+			continue;
+		}
+		struct wlr_output *out = o->wlr_output;
+		int first = n;
+		wl_list_for_each(v, &server->toplevels, link) {
+			if (n < SWITCHER_MAX && tile_takes(v, out)) {
+				list[n++] = v;
+			}
+		}
+		/* in the order they came (swapped by move and promote) */
+		for (int i = first + 1; i < n; i++) {
+			struct desk_toplevel *k = list[i];
+			int j = i - 1;
+			while (j >= first && list[j]->tile_seq > k->tile_seq) {
+				list[j + 1] = list[j];
+				j--;
+			}
+			list[j + 1] = k;
+		}
+		counts[nout] = n - first;
+		areas[nout] = max_area(server, out);
+		TILE_MIX(sig, (uintptr_t)out);
+		TILE_MIX(sig, areas[nout].x);
+		TILE_MIX(sig, areas[nout].y);
+		TILE_MIX(sig, areas[nout].width);
+		TILE_MIX(sig, areas[nout].height);
+		for (int i = first; i < n; i++) {
+			TILE_MIX(sig, (uintptr_t)list[i]);
+			TILE_MIX(sig, list[i]->tile_seq);
+		}
+		TILE_MIX(sig, n - first);
+		nout++;
+	}
+	if (sig == server->tile_sig) {
+		return;
+	}
+	server->tile_sig = sig;
+	wl_list_for_each(v, &server->toplevels, link) {
+		v->tile_mark = false;
+	}
+	int gap = (int)lround(server->tile_gap_pt * desk_px_per_pt(server->desk_w));
+	int at = 0;
+	for (int k = 0; k < nout; k++) {
+		int c = counts[k];
+		if (c > 0) {
+			struct tile_box boxes[SWITCHER_MAX];
+			struct wlr_box a = areas[k];
+			tile_arrange(server->tile_layout, (struct tile_box){ a.x, a.y, a.width, a.height }, c,
+				server->tile_ratio, gap, boxes);
+			for (int i = 0; i < c; i++) {
+				v = list[at + i];
+				v->tile_mark = true;
+				if (!v->tiled) {
+					if (!v->tile_was_set) {
+						v->tile_was = tile_box_of(v);
+						v->tile_was_set = true;
+					}
+					v->tiled = true;
+					v->half = 0;
+				}
+				tile_put(v, (struct wlr_box){ boxes[i].x, boxes[i].y, boxes[i].w, boxes[i].h });
+			}
+			/* monocle: the one with the keys in front */
+			server->tile_any = true;
+		}
+		at += c;
+	}
+	/* gone from the tiling (folded, on the whole screen, opened out, moved
+	 * to another stack): no longer laid out by it */
+	wl_list_for_each(v, &server->toplevels, link) {
+		if (v->tiled && !v->tile_mark) {
+			v->tiled = false;
+		}
+	}
+	wlr_log(WLR_DEBUG, "tiling: %d sheets laid out %s on %d screens", n,
+		tile_layout_name(server->tile_layout), nout);
+	server_schedule_frames(server);
+}
+
+/* picked up and moved: out of the tiling, at the size it was before it, held
+ * where across it the hand had it */
+static void tile_lift(struct desk_server *server, struct desk_toplevel *v)
+{
+	int l, t, r, b;
+	view_insets(v, &l, &t, &r, &b);
+	v->tiled = false;
+	v->floating = true;
+	server->tile_sig = 0;
+	if (v->tile_was_set && v->tile_was.width > l + r && v->tile_was.height > t + b) {
+		double across = v->outer_w > 1 ? server->grab_x / v->outer_w : 0.5;
+		across = clampf_d(across, 0.05, 0.95);
+		server->grab_x = across * v->tile_was.width;
+		view_set_size(v, v->tile_was.width - l - r, v->tile_was.height - t - b);
+	}
+	v->tile_was_set = false;
+}
+
+/* shell.conf read (again): what it says now, but for what a key has turned
+ * since, while the file says the same of it */
+static void tile_conf_applied(struct desk_server *server, const struct tile_conf *was)
+{
+	const struct tile_conf *c = &server->conf.tile;
+	if (!was || was->tiling != c->tiling) {
+		server->tiling = c->tiling;
+	}
+	if (!was || was->layout != c->layout) {
+		server->tile_layout = c->layout;
+	}
+	if (!was || was->ratio != c->ratio) {
+		server->tile_ratio = c->ratio;
+	}
+	if (!was || was->gap_pt != c->gap_pt) {
+		server->tile_gap_pt = c->gap_pt;
+	}
+	if (server->ws < 1) {
+		server->ws = server->ws_back = 1;
+	}
+	/* the seal on the sheet with the keys: every frame drawn again for it */
+	if (desk_ronin_style() != c->style_redronin) {
+		desk_set_ronin_style(c->style_redronin);
+		struct desk_toplevel *v;
+		if (server->toplevels.next) {
+			wl_list_for_each(v, &server->toplevels, link) {
+				if (v->scene_tree) {
+					v->chrome_key = 0;
+					view_repaint_chrome(v);
+				}
+			}
+		}
+	}
+	server->tile_sig = 0;
+	/* (read first before there are any screens, or a list of them) */
+	if (server->outputs.next) {
+		server_schedule_frames(server);
+	}
+}
+
+/* the sheet the keys are on, or the one in front of this stack */
+static struct desk_toplevel *tile_front(struct desk_server *server)
+{
+	struct desk_toplevel *v = view_of_surface(server, server->seat->keyboard_state.focused_surface);
+	if (v && !v->unmanaged && v->scene_tree && tile_ws_here(v)) {
+		return v;
+	}
+	wl_list_for_each(v, &server->toplevels, link) {
+		if (v->scene_tree && !v->unmanaged && !v->ime_popup && tile_ws_here(v)
+			&& !v->sheet.in_drawer && view_takes_keys(v)) {
+			return v;
+		}
+	}
+	return NULL;
+}
+
+/* the sheets of this stack that can be gone to, and where they lie */
+static int tile_visible(struct desk_server *server, struct desk_toplevel **list,
+	struct tile_box *boxes, bool tiled_only)
+{
+	int n = 0;
+	struct desk_toplevel *v;
+	wl_list_for_each(v, &server->toplevels, link) {
+		if (n >= SWITCHER_MAX || !v->scene_tree || v->unmanaged || v->ime_popup || v->ws_hidden
+			|| !tile_ws_here(v) || v->sheet.phase != SHEET_IDLE || !v->scene_tree->node.enabled
+			|| !view_takes_keys(v) || (tiled_only && !v->tiled)) {
+			continue;
+		}
+		struct wlr_box b = tile_box_of(v);
+		list[n] = v;
+		boxes[n] = (struct tile_box){ b.x, b.y, b.width, b.height };
+		n++;
+	}
+	return n;
+}
+
+static int tile_index(struct desk_toplevel **list, int n, const struct desk_toplevel *v)
+{
+	for (int i = 0; i < n; i++) {
+		if (list[i] == v) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static bool tile_cycle(struct desk_server *server, int dir);
+
+static bool tile_focus_dir(struct desk_server *server, enum tile_dir d)
+{
+	struct desk_toplevel *list[SWITCHER_MAX];
+	struct tile_box boxes[SWITCHER_MAX];
+	int n = tile_visible(server, list, boxes, false);
+	struct desk_toplevel *front = tile_front(server);
+	int from = tile_index(list, n, front);
+	if (from < 0) {
+		if (n > 0) {
+			focus_toplevel(list[0]);
+		}
+		return n > 0;
+	}
+	int to = tile_pick_dir(boxes, n, from, d);
+	if (to < 0) {
+		/* monocle: every sheet in one place, so the way is the order */
+		if (server->tiling && server->tile_layout == TILE_LAYOUT_MONOCLE && front->tiled) {
+			return tile_cycle(server, d == TILE_RIGHT || d == TILE_DOWN ? 1 : -1);
+		}
+		return false;
+	}
+	focus_toplevel(list[to]);
+	return true;
+}
+
+static enum wlr_direction tile_wlr_dir(enum tile_dir d)
+{
+	return d == TILE_LEFT ? WLR_DIRECTION_LEFT : d == TILE_RIGHT ? WLR_DIRECTION_RIGHT
+		: d == TILE_UP ? WLR_DIRECTION_UP : WLR_DIRECTION_DOWN;
+}
+
+/* onto the next screen that way, the size it is, in the middle of it */
+static bool tile_to_screen(struct desk_server *server, struct desk_toplevel *v, enum tile_dir d)
+{
+	struct wlr_output *out = view_screen(v);
+	if (!out) {
+		return false;
+	}
+	struct wlr_box b = tile_box_of(v);
+	struct wlr_output *next = wlr_output_layout_adjacent_output(server->output_layout,
+		tile_wlr_dir(d), out, b.x + b.width / 2.0, b.y + b.height / 2.0);
+	if (!next) {
+		return false;
+	}
+	struct wlr_box ma = max_area(server, next);
+	int w = b.width < ma.width ? b.width : ma.width, h = b.height < ma.height ? b.height : ma.height;
+	tile_put(v, (struct wlr_box){ ma.x + (ma.width - w) / 2, ma.y + (ma.height - h) / 2, w, h });
+	server->tile_sig = 0;
+	return true;
+}
+
+static bool tile_move_dir(struct desk_server *server, enum tile_dir d)
+{
+	struct desk_toplevel *v = tile_front(server);
+	if (!v || v->sheet.phase != SHEET_IDLE) {
+		return false;
+	}
+	if (v->tiled) {
+		struct desk_toplevel *list[SWITCHER_MAX];
+		struct tile_box boxes[SWITCHER_MAX];
+		int n = tile_visible(server, list, boxes, true);
+		int from = tile_index(list, n, v);
+		int to = from < 0 ? -1 : tile_pick_dir(boxes, n, from, d);
+		if (to >= 0) {
+			struct desk_toplevel *w = list[to];
+			unsigned s = v->tile_seq;
+			v->tile_seq = w->tile_seq;
+			w->tile_seq = s;
+			if (view_screen(v) != view_screen(w)) {
+				/* across screens: each where the other was */
+				struct wlr_box bv = tile_box_of(v), bw = tile_box_of(w);
+				tile_put(v, bw);
+				tile_put(w, bv);
+			}
+			server->tile_sig = 0;
+			return true;
+		}
+		return tile_to_screen(server, v, d);
+	}
+	/* floating: laid on a half, opened out, or back */
+	struct wlr_output *out = view_screen(v);
+	if (v->fullscreen || !out) {
+		return false;
+	}
+	switch (d) {
+	case TILE_LEFT:
+	case TILE_RIGHT: {
+		int side = d == TILE_LEFT ? -1 : 1;
+		if (v->half == side && !v->maximized && tile_to_screen(server, v, d)) {
+			return true;
+		}
+		view_lay_half(v, side, out);
+		return true;
+	}
+	case TILE_UP:
+		if (!v->maximized) {
+			view_toggle_max(v);
+		}
+		return true;
+	case TILE_DOWN:
+	default:
+		if (v->maximized) {
+			view_toggle_max(v);
+		} else if (v->half) {
+			view_lay_half(v, v->half, out);
+		}
+		return true;
+	}
+}
+
+static int ws_resolve(struct desk_server *server, int n)
+{
+	if (n == TILE_WS_BACK) {
+		return server->ws_back;
+	}
+	if (n == TILE_WS_NEXT || n == TILE_WS_PREV) {
+		int to = server->ws + (n == TILE_WS_NEXT ? 1 : -1);
+		if (server->conf.tile.ws_wrap) {
+			to = (to - 1 + TILE_WS_MAX) % TILE_WS_MAX + 1;
+		}
+		return to;
+	}
+	return n;
+}
+
+static bool ws_go(struct desk_server *server, int n)
+{
+	n = ws_resolve(server, n);
+	if (n < 1 || n > TILE_WS_MAX || n == server->ws) {
+		return false;
+	}
+	server->ws_back = server->ws;
+	server->ws = n;
+	ws_enforce(server);
+	server->tile_sig = 0;
+	struct desk_toplevel *f = view_of_surface(server, server->seat->keyboard_state.focused_surface);
+	if (!f || !tile_ws_here(f)) {
+		focus_next(server);
+	}
+	snd_at(server, DESK_SND_SHEET_TAKE, server->cursor->x, 0.5);
+	clock_publish(server);
+	wlr_log(WLR_INFO, "the desk is at stack %d (from %d)", n, server->ws_back);
+	server_schedule_frames(server);
+	return true;
+}
+
+/* asked for (a link opened, a program brought up): its stack is gone to */
+static void tile_bring(struct desk_toplevel *v)
+{
+	if (!tile_ws_here(v) && v->ws >= 1 && v->ws <= TILE_WS_MAX) {
+		ws_go(v->server, v->ws);
+	}
+}
+
+static bool ws_send(struct desk_server *server, int n, bool follow)
+{
+	struct desk_toplevel *v = tile_front(server);
+	n = ws_resolve(server, n);
+	if (!v || n < 1 || n > TILE_WS_MAX || v->sheet.in_drawer) {
+		return false;
+	}
+	if (v->ws == n && !v->pinned) {
+		return true;
+	}
+	v->ws = n;
+	v->pinned = false;
+	server->tile_sig = 0;
+	if (follow) {
+		ws_go(server, n);
+		focus_toplevel(v);
+	} else {
+		ws_enforce(server);
+		focus_next(server);
+	}
+	server_schedule_frames(server);
+	return true;
+}
+
+/* the sheets of this stack in the tiling's order, the next after the front one */
+static bool tile_cycle(struct desk_server *server, int dir)
+{
+	struct desk_toplevel *list[SWITCHER_MAX];
+	struct tile_box boxes[SWITCHER_MAX];
+	int n = tile_visible(server, list, boxes, false);
+	if (n < 1) {
+		return false;
+	}
+	for (int i = 1; i < n; i++) {
+		struct desk_toplevel *k = list[i];
+		int j = i - 1;
+		while (j >= 0 && list[j]->tile_seq > k->tile_seq) {
+			list[j + 1] = list[j];
+			j--;
+		}
+		list[j + 1] = k;
+	}
+	int at = tile_index(list, n, tile_front(server));
+	int to = at < 0 ? 0 : ((at + dir) % n + n) % n;
+	focus_toplevel(list[to]);
+	return true;
+}
+
+static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint32_t mods);
+static void std_open(int which);
+
+/* Do what an action says: from a bind, or the control socket. why says
+ * what went wrong, when it did. */
+static bool tile_do(struct desk_server *server, const struct tile_action *a, char *why,
+	size_t whyn)
+{
+	if (why && whyn) {
+		why[0] = '\0';
+	}
+	if (locked(server) || console_dying(server)) {
+		if (why && whyn) {
+			snprintf(why, whyn, "the desk is locked");
+		}
+		return false;
+	}
+	/* sheets are worked on at the desk, not at the bookcase or a panel */
+	bool at_desk = !shelf_up(server) && !console_up(server) && !post_up(server);
+	struct desk_toplevel *v;
+	bool ok = true;
+	switch (a->act) {
+	case TILE_ACT_NONE:
+		return true;
+	case TILE_ACT_EXEC:
+		spawn(a->cmd);
+		return true;
+	case TILE_ACT_TERMINAL:
+		terminal_open();
+		return true;
+	case TILE_ACT_BROWSER:
+		std_open(DESK_STD_BROWSER);
+		return true;
+	case TILE_ACT_FILES:
+		std_open(DESK_STD_FILES);
+		return true;
+	case TILE_ACT_EDITOR:
+		std_open(DESK_STD_EDITOR);
+		return true;
+	/* the desk's own keys for these, with what they look to first */
+	case TILE_ACT_DRAWER:
+		return handle_keybinding(server, XKB_KEY_d, WLR_MODIFIER_LOGO);
+	case TILE_ACT_SHELF:
+		return handle_keybinding(server, XKB_KEY_a, WLR_MODIFIER_LOGO);
+	case TILE_ACT_CONSOLE:
+		return handle_keybinding(server, XKB_KEY_c, WLR_MODIFIER_LOGO);
+	case TILE_ACT_POST:
+		return handle_keybinding(server, XKB_KEY_n, WLR_MODIFIER_LOGO);
+	case TILE_ACT_LOCK:
+		lock_request(server);
+		return true;
+	case TILE_ACT_LOGOUT:
+		end_begin(server, END_LOG_OUT);
+		return true;
+	case TILE_ACT_SNIP:
+		snip_begin(server, false);
+		return true;
+	case TILE_ACT_CLIPBOARD:
+		return handle_keybinding(server, XKB_KEY_v, WLR_MODIFIER_LOGO);
+	case TILE_ACT_SWITCHER:
+		desk_switch_application(server);
+		return true;
+	case TILE_ACT_RELOAD:
+		server->conf.mtime = 0;
+		server->conf.mtime_ns = -1;
+		shell_conf_poll(server);
+		return true;
+	case TILE_ACT_TILING:
+		server->tiling = a->arg < 0 ? !server->tiling : a->arg == 1;
+		server->tile_sig = 0;
+		wlr_log(WLR_INFO, "tiling %s", server->tiling ? "on" : "off");
+		clock_publish(server);
+		server_schedule_frames(server);
+		return true;
+	case TILE_ACT_LAYOUT:
+		server->tile_layout = a->arg < 0
+			? (enum tile_layout)((server->tile_layout + 1) % TILE_LAYOUT_COUNT)
+			: (enum tile_layout)a->arg;
+		server->tile_sig = 0;
+		wlr_log(WLR_INFO, "tiling laid out %s", tile_layout_name(server->tile_layout));
+		server_schedule_frames(server);
+		return true;
+	case TILE_ACT_RATIO: {
+		double r = a->abs ? a->num : server->tile_ratio + a->num;
+		server->tile_ratio = r < 0.1 ? 0.1 : r > 0.9 ? 0.9 : r;
+		server->tile_sig = 0;
+		server_schedule_frames(server);
+		return true;
+	}
+	case TILE_ACT_GAP: {
+		double g = a->abs ? a->num : server->tile_gap_pt + a->num;
+		server->tile_gap_pt = g < 0.0 ? 0.0 : g > 64.0 ? 64.0 : g;
+		server->tile_sig = 0;
+		server_schedule_frames(server);
+		return true;
+	}
+	case TILE_ACT_WORKSPACE:
+		ws_go(server, a->arg);
+		return true;
+	case TILE_ACT_TO_WORKSPACE:
+	case TILE_ACT_TO_WORKSPACE_SILENT:
+		ok = at_desk && ws_send(server, a->arg, a->act == TILE_ACT_TO_WORKSPACE);
+		break;
+	case TILE_ACT_FOCUS:
+		ok = at_desk && tile_focus_dir(server, a->dir);
+		break;
+	case TILE_ACT_MOVE:
+		ok = at_desk && tile_move_dir(server, a->dir);
+		break;
+	case TILE_ACT_CYCLE:
+		ok = at_desk && tile_cycle(server, a->arg);
+		break;
+	default:
+		v = at_desk ? tile_front(server) : NULL;
+		if (!v || v->sheet.phase == SHEET_FOLDING || v->sheet.phase == SHEET_UNFOLDING) {
+			ok = false;
+			break;
+		}
+		switch (a->act) {
+		case TILE_ACT_CLOSE:
+			for (const struct desk_thing *const *t = desk_things; *t; t++) {
+				if ((*t)->has_keys && (*t)->has_keys(server)) {
+					(*t)->put_away(server);
+					return true;
+				}
+			}
+			view_close(v);
+			break;
+		case TILE_ACT_FULLSCREEN:
+			if (!v->unmanaged && v->sheet.phase == SHEET_IDLE) {
+				view_set_fullscreen(v, !v->fullscreen);
+			}
+			break;
+		case TILE_ACT_MAXIMIZE:
+			if (v->sheet.phase == SHEET_IDLE && !v->fullscreen) {
+				view_toggle_max(v);
+			}
+			break;
+		case TILE_ACT_FOLD:
+			if (v->fullscreen) {
+				view_set_fullscreen(v, false);
+			}
+			view_fold_toggle(v);
+			break;
+		case TILE_ACT_FLOAT:
+			v->floating = !v->floating;
+			if (v->floating && v->tiled) {
+				v->tiled = false;
+				if (v->tile_was_set) {
+					tile_put(v, v->tile_was);
+				}
+				v->tile_was_set = false;
+			}
+			focus_toplevel(v);
+			server->tile_sig = 0;
+			wlr_log(WLR_INFO, "%s %s", view_title(v), v->floating ? "floats" : "tiles");
+			break;
+		case TILE_ACT_PIN:
+			v->pinned = !v->pinned;
+			if (!v->pinned) {
+				v->ws = server->ws;
+			}
+			server->tile_sig = 0;
+			break;
+		case TILE_ACT_PROMOTE: {
+			if (!v->tiled) {
+				ok = false;
+				break;
+			}
+			struct desk_toplevel *w, *first = v;
+			wl_list_for_each(w, &server->toplevels, link) {
+				if (w->tiled && view_screen(w) == view_screen(v) && w->tile_seq < first->tile_seq) {
+					first = w;
+				}
+			}
+			unsigned s = v->tile_seq;
+			v->tile_seq = first->tile_seq;
+			first->tile_seq = s;
+			server->tile_sig = 0;
+			break;
+		}
+		case TILE_ACT_CENTER: {
+			struct wlr_output *out = view_screen(v);
+			if (!out || v->fullscreen) {
+				ok = false;
+				break;
+			}
+			if (v->tiled) {
+				v->tiled = false;
+				v->floating = true;
+				v->tile_was_set = false;
+			}
+			struct wlr_box b = tile_box_of(v), ma = max_area(server, out);
+			tile_put(v, (struct wlr_box){ ma.x + (ma.width - b.width) / 2,
+				ma.y + (ma.height - b.height) / 2, b.width, b.height });
+			server->tile_sig = 0;
+			break;
+		}
+		default:
+			ok = false;
+			break;
+		}
+		break;
+	}
+	if (!ok && why && whyn && !why[0]) {
+		snprintf(why, whyn, "nothing to %s here", tile_act_name(a->act));
+	}
+	server_schedule_frames(server);
+	return ok;
+}
+
+/* the standard program for a job (README, "Standard programs") */
+static void std_open(int which)
+{
+	const struct desk_app_list *l = desk_apps_acquire();
+	const struct desk_app *app = desk_apps_for_std(l, which);
+	if (app) {
+		desk_app_launch(app);
+	}
+	desk_apps_release(l);
+}
+
+/* A key pressed: the bind for it, if shell.conf has one. syms as typed, and
+ * the key's own at the first level of the first layout. */
+static bool tile_key(struct desk_server *server, struct xkb_keymap *keymap, xkb_keycode_t keycode,
+	const xkb_keysym_t *syms, int nsyms, uint32_t mods)
+{
+	const struct tile_conf *c = &server->conf.tile;
+	if (c->n_binds == 0) {
+		return false;
+	}
+	uint32_t cand[9];
+	int nc = 0;
+	for (int i = 0; i < nsyms && nc < 8; i++) {
+		cand[nc++] = syms[i];
+	}
+	const xkb_keysym_t *first;
+	int n0 = xkb_keymap_key_get_syms_by_level(keymap, keycode, 0, 0, &first);
+	if (n0 > 0) {
+		cand[nc++] = first[0];
+	}
+	const struct tile_bind *b = tile_bind_find(c, mods, cand, nc);
+	if (!b) {
+		return false;
+	}
+	char why[120];
+	if (!tile_do(server, &b->action, why, sizeof why) && why[0]) {
+		wlr_log(WLR_DEBUG, "bind %s: %s", tile_act_name(b->action.act), why);
+	}
+	return true;
+}
+
+/* ---- the control socket: desk-ctl do ACTION, desk-ctl query ----
+ *
+ * $XDG_RUNTIME_DIR/desk-$WAYLAND_DISPLAY.ctl, the user's own (0600): one
+ * line in, one answer out, then closed. The line
+ * is read when it has come, so the desk never waits on a caller. */
+
+struct ctl_conn {
+	struct desk_server *server;
+	int fd;
+	struct wl_event_source *src;
+};
+
+static void json_str(FILE *f, const char *s)
+{
+	fputc('"', f);
+	for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+		if (*p == '"' || *p == '\\') {
+			fprintf(f, "\\%c", *p);
+		} else if (*p < 0x20) {
+			fprintf(f, "\\u%04x", *p);
+		} else {
+			fputc(*p, f);
+		}
+	}
+	fputc('"', f);
+}
+
+static void ctl_query(struct desk_server *server, FILE *f)
+{
+	struct desk_toplevel *front = view_of_surface(server,
+		server->seat->keyboard_state.focused_surface);
+	fprintf(f, "{\"workspace\":%d,\"previous\":%d,\"tiling\":%s,\"layout\":\"%s\","
+		"\"ratio\":%.3f,\"gap\":%.1f,\"binds\":%d,\"windows\":[",
+		server->ws, server->ws_back, server->tiling ? "true" : "false",
+		tile_layout_name(server->tile_layout), server->tile_ratio, server->tile_gap_pt,
+		server->conf.tile.n_binds);
+	bool first = true;
+	struct desk_toplevel *v;
+	wl_list_for_each_reverse(v, &server->toplevels, link) {
+		if (!v->scene_tree || v->unmanaged || v->ime_popup) {
+			continue;
+		}
+		char id[128] = "";
+		view_app_id(v, id, sizeof id);
+		struct wlr_box b = tile_box_of(v);
+		struct wlr_output *out = view_screen(v);
+		fprintf(f, "%s{\"title\":", first ? "" : ",");
+		json_str(f, view_title(v));
+		fprintf(f, ",\"app_id\":");
+		json_str(f, id);
+		fprintf(f, ",\"screen\":");
+		json_str(f, out ? out->name : "");
+		fprintf(f, ",\"workspace\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"tiled\":%s,"
+			"\"floating\":%s,\"pinned\":%s,\"hidden\":%s,\"folded\":%s,\"fullscreen\":%s,"
+			"\"maximized\":%s,\"focused\":%s,\"seq\":%u}",
+			v->ws, b.x, b.y, b.width, b.height, v->tiled ? "true" : "false",
+			v->floating ? "true" : "false", v->pinned ? "true" : "false",
+			v->ws_hidden ? "true" : "false", v->sheet.phase != SHEET_IDLE ? "true" : "false",
+			v->fullscreen ? "true" : "false", v->maximized ? "true" : "false",
+			v == front ? "true" : "false", v->tile_seq);
+		first = false;
+	}
+	fprintf(f, "]}\n");
+}
+
+static void ctl_conn_end(struct ctl_conn *c)
+{
+	wl_event_source_remove(c->src);
+	close(c->fd);
+	free(c);
+}
+
+static int ctl_readable(int fd, uint32_t mask, void *data)
+{
+	struct ctl_conn *c = data;
+	char line[1024];
+	ssize_t n = (mask & WL_EVENT_READABLE) ? recv(fd, line, sizeof line - 1, MSG_DONTWAIT) : -1;
+	if (n <= 0) {
+		ctl_conn_end(c);
+		return 0;
+	}
+	line[n] = '\0';
+	line[strcspn(line, "\r\n")] = '\0';
+	char *out = NULL;
+	size_t outn = 0;
+	FILE *f = open_memstream(&out, &outn);
+	if (!f) {
+		ctl_conn_end(c);
+		return 0;
+	}
+	char *cmd = line;
+	while (*cmd == ' ' || *cmd == '\t') {
+		cmd++;
+	}
+	if (!strcmp(cmd, "query")) {
+		ctl_query(c->server, f);
+	} else if (!strcmp(cmd, "binds")) {
+		/* every bind in force, one a line: for a cheat sheet (Super+slash) */
+		const struct tile_conf *tc = &c->server->conf.tile;
+		for (int i = 0; i < tc->n_binds; i++) {
+			char bl[TILE_CMD_MAX + 128];
+			tile_bind_format(&tc->binds[i], bl, sizeof bl);
+			fprintf(f, "%s\n", bl);
+		}
+	} else if (!strncmp(cmd, "do ", 3)) {
+		struct tile_action a;
+		char why[200];
+		if (!tile_action_parse(cmd + 3, &a, why, sizeof why)) {
+			fprintf(f, "error: %s\n", why);
+		} else if (!tile_do(c->server, &a, why, sizeof why)) {
+			fprintf(f, "error: %s\n", why[0] ? why : "it could not be done");
+		} else {
+			fprintf(f, "ok\n");
+		}
+	} else {
+		fprintf(f, "error: say \"do ACTION\" or \"query\"\n");
+	}
+	fclose(f);
+	if (out) {
+		(void)send(fd, out, outn, MSG_DONTWAIT | MSG_NOSIGNAL);
+		free(out);
+	}
+	ctl_conn_end(c);
+	return 0;
+}
+
+static int ctl_accept(int fd, uint32_t mask, void *data)
+{
+	struct desk_server *server = data;
+	(void)mask;
+	/* (the socket is 0600 in the user's own 0700 runtime folder: only they
+	 * reach it, as with any other compositor's) */
+	int cfd = accept(fd, NULL, NULL);
+	if (cfd < 0) {
+		return 0;
+	}
+	if (fcntl(cfd, F_SETFD, FD_CLOEXEC) != 0
+		|| fcntl(cfd, F_SETFL, fcntl(cfd, F_GETFL) | O_NONBLOCK) != 0) {
+		close(cfd);
+		return 0;
+	}
+	struct ctl_conn *c = calloc(1, sizeof *c);
+	if (!c) {
+		close(cfd);
+		return 0;
+	}
+	c->server = server;
+	c->fd = cfd;
+	c->src = wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display), cfd,
+		WL_EVENT_READABLE, ctl_readable, c);
+	if (!c->src) {
+		close(cfd);
+		free(c);
+	}
+	return 0;
+}
+
+static bool ctl_path_for(const char *display, char *out, size_t n)
+{
+	const char *run = getenv("XDG_RUNTIME_DIR");
+	if (!run || !*run || !display || !*display || strchr(display, '/')) {
+		return false;
+	}
+	int w = snprintf(out, n, "%s/desk-%s.ctl", run, display);
+	return w > 0 && (size_t)w < n;
+}
+
+static void ctl_start(struct desk_server *server, const char *display)
+{
+	server->ctl_fd = -1;
+	if (!ctl_path_for(display, server->ctl_path, sizeof server->ctl_path)) {
+		server->ctl_path[0] = '\0';
+		return;
+	}
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (fd < 0) {
+		return;
+	}
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	snprintf(addr.sun_path, sizeof addr.sun_path, "%s", server->ctl_path);
+	unlink(server->ctl_path);
+	mode_t was = umask(0177);
+	int r = bind(fd, (struct sockaddr *)&addr, sizeof addr);
+	umask(was);
+	if (r != 0 || listen(fd, 8) != 0) {
+		wlr_log(WLR_ERROR, "the control socket %s: %s", server->ctl_path, strerror(errno));
+		close(fd);
+		server->ctl_path[0] = '\0';
+		return;
+	}
+	server->ctl_fd = fd;
+	server->ctl_src = wl_event_loop_add_fd(wl_display_get_event_loop(server->wl_display), fd,
+		WL_EVENT_READABLE, ctl_accept, server);
+	wlr_log(WLR_INFO, "desk-ctl listens at %s", server->ctl_path);
+}
+
+static void ctl_stop(struct desk_server *server)
+{
+	if (server->ctl_src) {
+		wl_event_source_remove(server->ctl_src);
+		server->ctl_src = NULL;
+	}
+	if (server->ctl_fd >= 0) {
+		close(server->ctl_fd);
+		server->ctl_fd = -1;
+	}
+	if (server->ctl_path[0]) {
+		unlink(server->ctl_path);
+		server->ctl_path[0] = '\0';
+	}
+}
+
+/* desk --ctl do ACTION... | query: the client end, for desk-ctl */
+static int ctl_client(int argc, char **argv)
+{
+	char path[108];
+	const char *display = getenv("WAYLAND_DISPLAY");
+	if (!ctl_path_for(display, path, sizeof path) || access(path, F_OK) != 0) {
+		/* (from another VT: the first desk of this user's there is) */
+		const char *run = getenv("XDG_RUNTIME_DIR");
+		DIR *d = run ? opendir(run) : NULL;
+		path[0] = '\0';
+		for (struct dirent *e; d && (e = readdir(d));) {
+			size_t len = strlen(e->d_name);
+			if (!strncmp(e->d_name, "desk-", 5) && len > 4 && !strcmp(e->d_name + len - 4, ".ctl")) {
+				snprintf(path, sizeof path, "%s/%s", run, e->d_name);
+				break;
+			}
+		}
+		if (d) {
+			closedir(d);
+		}
+		if (!path[0]) {
+			fprintf(stderr, "desk-ctl: DEsk is not running here (no control socket)\n");
+			return 1;
+		}
+	}
+	char line[1024];
+	size_t at = 0;
+	for (int i = 0; i < argc && at < sizeof line - 2; i++) {
+		int w = snprintf(line + at, sizeof line - at, "%s%s", i ? " " : "", argv[i]);
+		at += w > 0 ? (size_t)w : 0;
+	}
+	if (at >= sizeof line - 1) {
+		fprintf(stderr, "desk-ctl: too long\n");
+		return 2;
+	}
+	line[at++] = '\n';
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	snprintf(addr.sun_path, sizeof addr.sun_path, "%s", path);
+	if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+		fprintf(stderr, "desk-ctl: %s: %s\n", path, strerror(errno));
+		return 1;
+	}
+	struct timeval tv = { 5, 0 };
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	if (write(fd, line, at) != (ssize_t)at) {
+		close(fd);
+		return 1;
+	}
+	shutdown(fd, SHUT_WR);
+	bool error = false, any = false;
+	char buf[4096];
+	ssize_t n;
+	while ((n = read(fd, buf, sizeof buf)) > 0) {
+		if (!any && n >= 6 && !strncmp(buf, "error:", 6)) {
+			error = true;
+		}
+		any = true;
+		fwrite(buf, 1, (size_t)n, error ? stderr : stdout);
+	}
+	close(fd);
+	return !any ? 1 : error ? 3 : 0;
+}
+
 static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint32_t mods)
 {
 	/* Once the lamp starts going out there is nothing to press, nothing to
@@ -22304,9 +24036,9 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 					return true;
 				}
 			}
-			if (!wl_list_empty(&server->toplevels)) {
-				struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
-				view_close(view);
+			struct desk_toplevel *front = tile_front(server);
+			if (front) {
+				view_close(front);
 			}
 			return true;
 		case XKB_KEY_Tab:
@@ -22318,8 +24050,8 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 			if (!shelf_up(server) && !console_up(server) && !post_up(server)) {
 				struct desk_toplevel *v = view_of_surface(server,
 					server->seat->keyboard_state.focused_surface);
-				if (!v && !wl_list_empty(&server->toplevels)) {
-					v = wl_container_of(server->toplevels.next, v, link);
+				if (!v) {
+					v = tile_front(server);
 				}
 				if (v && v->scene_tree && v->sheet.phase == SHEET_IDLE && !v->unmanaged) {
 					view_set_fullscreen(v, !v->fullscreen);
@@ -22332,28 +24064,31 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 			if (!shelf_up(server) && !console_up(server) && !post_up(server)) {
 				struct desk_toplevel *v = view_of_surface(server,
 					server->seat->keyboard_state.focused_surface);
-				if (!v && !wl_list_empty(&server->toplevels)) {
-					v = wl_container_of(server->toplevels.next, v, link);
+				if (!v) {
+					v = tile_front(server);
 				}
-				if (v && v->scene_tree) {
+				if (v && v->scene_tree && v->tiled) {
+					tile_move_dir(server, sym == XKB_KEY_Left ? TILE_LEFT : TILE_RIGHT);
+				} else if (v && v->scene_tree) {
 					view_lay_half(v, sym == XKB_KEY_Left ? -1 : 1, view_screen(v));
 				}
 			}
 			return true;
 		case XKB_KEY_m:
-		case XKB_KEY_M:
-			if (!wl_list_empty(&server->toplevels)) {
-				struct desk_toplevel *view = view_of_surface(server,
-					server->seat->keyboard_state.focused_surface);
-				if (!view) {
-					view = wl_container_of(server->toplevels.next, view, link);
-				}
+		case XKB_KEY_M: {
+			struct desk_toplevel *view = view_of_surface(server,
+				server->seat->keyboard_state.focused_surface);
+			if (!view) {
+				view = tile_front(server);
+			}
+			if (view) {
 				if (view->fullscreen) {
 					view_set_fullscreen(view, false);
 				}
 				view_fold_toggle(view);
 			}
 			return true;
+		}
 		case XKB_KEY_d:
 		case XKB_KEY_D:
 			if (!shelf_up(server)) {
@@ -22383,9 +24118,9 @@ static bool handle_keybinding(struct desk_server *server, xkb_keysym_t sym, uint
 		}
 	}
 	if ((mods & WLR_MODIFIER_ALT) && sym == XKB_KEY_F4) {
-		if (!wl_list_empty(&server->toplevels)) {
-			struct desk_toplevel *view = wl_container_of(server->toplevels.next, view, link);
-			view_close(view);
+		struct desk_toplevel *front = tile_front(server);
+		if (front) {
+			view_close(front);
 		}
 		return true;
 	}
@@ -22925,10 +24660,9 @@ static void lock_finish(struct desk_server *server)
 	}
 	/* let in on a day kept: the clock says so */
 	show_for_today(server);
-	if (!wl_list_empty(&server->toplevels)) {
-		struct desk_toplevel *top = wl_container_of(server->toplevels.next, top, link);
-		focus_toplevel(top);
-	}
+	/* (the one in front of the stack the desk is on; or a launcher left up) */
+	focus_next(server);
+	ls_keys(server);
 	server_schedule_frames(server);
 	wlr_log(WLR_INFO, "lock: in");
 }
@@ -27281,6 +29015,7 @@ static void xdg_request_activate(struct wl_listener *listener, void *data)
 	if (!view || !view->scene_tree || server->lock_phase != 0) {
 		return;
 	}
+	tile_bring(view);
 	if (view->sheet.phase != SHEET_IDLE) {
 		sheet_begin_unfold(server, &view->sheet);
 	}
@@ -28169,7 +29904,12 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data)
 			return;   /* what is typed is keyed on it */
 		}
 	}
-	if (down && !asked) {
+	if (down && !asked && !locked(server)) {
+		/* shell.conf's binds first: one can take a key of the desk's own */
+		handled = tile_key(server, keyboard->wlr_keyboard->keymap, keycode, syms, nsyms,
+			modifiers);
+	}
+	if (down && !asked && !handled) {
 		for (int i = 0; i < nsyms; i++) {
 			handled = handle_keybinding(server, syms[i], modifiers);
 			if (handled) {
@@ -29088,6 +30828,10 @@ static void process_cursor_move(struct desk_server *server)
 			|| fabs(server->cursor->y - server->move_from_y) > 5.0)) {
 		view_half_lift(server, toplevel);
 	}
+	if (toplevel->tiled && (fabs(server->cursor->x - server->move_from_x) > 5.0
+			|| fabs(server->cursor->y - server->move_from_y) > 5.0)) {
+		tile_lift(server, toplevel);
+	}
 	int x = (int)(server->cursor->x - server->grab_x);
 	wlr_scene_node_set_position(&toplevel->scene_tree->node, x,
 		work_clamp_y(server, x + toplevel->outer_w / 2,
@@ -29223,6 +30967,11 @@ static void process_cursor_motion(struct desk_server *server, uint32_t time)
 		}
 		return;
 	}
+	/* over a bar or a launcher (layer-shell): theirs */
+	if (!server->sw_shown && !server->snip_on && ls_pointer_motion(server, time)) {
+		return;
+	}
+	server->ls_pointer = false;
 	/* Alt+Tab's windows spread out: the hand is on them */
 	if (server->sw_shown) {
 		switcher_motion(server);
@@ -29596,6 +31345,10 @@ static void pointer_button(struct desk_server *server, struct wlr_pointer_button
 		return;
 	}
 	if (console_dying(server)) {
+		return;
+	}
+	/* on a bar or a launcher (layer-shell): theirs */
+	if (!server->sw_shown && !server->snip_on && ls_pointer_button(server, event)) {
 		return;
 	}
 	/* Alt+Tab's windows spread out: a click is for them, and so is its
@@ -33007,6 +34760,9 @@ static void pointer_axis(struct desk_server *server, struct wlr_pointer_axis_eve
 	if (locked(server) || server->sw_shown) {
 		return;
 	}
+	if (ls_pointer_axis(server, event)) {
+		return;
+	}
 	/* beside the desk, only paper: the program under the pointer's */
 	if (pointer_on_side(server)) {
 		if (!paper_moved(server)) {
@@ -33339,6 +35095,7 @@ static void desk_follow(struct desk_server *server)
  * desk, the views and their moves, the login, the door, the shows. */
 static void output_frame_work(struct desk_server *server)
 {
+	tile_tick(server);
 	folds_tick(server);
 	for (const struct desk_thing *const *t = desk_things; *t; t++) {
 		if ((*t)->tick) {
@@ -33975,6 +35732,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data)
 		return;
 	}
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+	tile_view_mapped(toplevel);
 	/* onto the sheet taken out of a binder for it, or the next place down */
 	struct desk_base *b = toplevel->xdg_toplevel->parent ? NULL
 		: base_claim(toplevel->server, toplevel);
@@ -34001,7 +35759,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data)
 	/* asked to be opened out, or for the whole screen, before it was up --
 	 * a game made on the whole screen: too early to be done then
 	 * (xdg_toplevel_request_*), so now; opened out first, as for X */
-	if (toplevel->xdg_toplevel->requested.maximized) {
+	if (toplevel->xdg_toplevel->requested.maximized && !tile_declines_max(toplevel, true)) {
 		view_toggle_max_now(toplevel);
 	}
 	if (toplevel->xdg_toplevel->requested.fullscreen) {
@@ -34182,7 +35940,9 @@ static void xdg_toplevel_request_maximize(struct wl_listener *listener, void *da
 	 * screen asks again for the opened-out sheet it had, and was given the
 	 * small one. Asked for what it is, it is told so (a configure). */
 	bool want = toplevel->xdg_toplevel->requested.maximized;
-	if (want != (toplevel->maximized != 0)) {
+	if (tile_declines_max(toplevel, want)) {
+		view_set_maximized(toplevel, false);
+	} else if (want != (toplevel->maximized != 0)) {
 		view_toggle_max(toplevel);
 	} else {
 		view_set_maximized(toplevel, toplevel->maximized != 0);
@@ -34680,9 +36440,10 @@ static void xview_map(struct wl_listener *listener, void *data)
 	view_paint_chrome(view, iw, ih);
 	xview_place(view);
 	wl_list_insert(&server->toplevels, &view->link);
+	tile_view_mapped(view);
 	view_sync_shadow(view);
 	/* opened out first, so that leaving the whole screen leaves it so */
-	if (xs->maximized_horz || xs->maximized_vert) {
+	if ((xs->maximized_horz || xs->maximized_vert) && !tile_declines_max(view, true)) {
 		view_toggle_max_now(view);
 	}
 	if (xs->fullscreen) {
@@ -34873,6 +36634,7 @@ static void xview_request_activate(struct wl_listener *listener, void *data)
 	struct desk_toplevel *view = wl_container_of(listener, view, request_activate);
 	(void)data;
 	if (xview_on_desk(view) && view->sheet.phase == SHEET_IDLE) {
+		tile_bring(view);
 		focus_toplevel(view);
 	}
 }
@@ -34904,7 +36666,9 @@ static void xview_request_maximize(struct wl_listener *listener, void *data)
 	}
 	struct wlr_xwayland_surface *xs = view->xsurface;
 	bool want = xs->maximized_horz || xs->maximized_vert;
-	if (want != (view->maximized != 0)) {
+	if (tile_declines_max(view, want)) {
+		view_set_maximized(view, false);
+	} else if (want != (view->maximized != 0)) {
 		view_toggle_max(view);
 	} else {
 		view_set_maximized(view, view->maximized != 0);
@@ -35423,6 +37187,10 @@ static bool cards_pick(void)
 
 int main(int argc, char **argv)
 {
+	/* desk-ctl's end of the control socket: no compositor at all */
+	if (argc >= 2 && !strcmp(argv[1], "--ctl")) {
+		return ctl_client(argc - 2, argv + 2);
+	}
 	g_start_real = real_sec();
 	desk_compat();
 	wlr_log_init(WLR_INFO, NULL);
@@ -35829,6 +37597,7 @@ int main(int argc, char **argv)
 	server.layer_count = wlr_scene_tree_create(&server.scene->tree);
 	/* and over all of it, the front door when the screen is locked */
 	server.layer_lock = wlr_scene_tree_create(&server.scene->tree);
+	ls_start(&server);
 	wlr_scene_node_set_enabled(&server.layer_lock->node, false);
 	/* and over even that, the light of fireworks: nothing to see but light */
 	server.layer_glow = wlr_scene_tree_create(&server.scene->tree);
@@ -35983,6 +37752,7 @@ int main(int argc, char **argv)
 
 	setenv("WAYLAND_DISPLAY", socket, true);
 	render_publish(&server, socket);
+	ctl_start(&server, socket);
 	setenv("XDG_CURRENT_DESKTOP", "DEsk", true);
 	setenv("XDG_SESSION_DESKTOP", "DEsk", true);
 	setenv("XDG_SESSION_TYPE", "wayland", true);
@@ -36103,6 +37873,7 @@ int main(int argc, char **argv)
 #ifdef DESK_HAVE_XWAYLAND
 	xwayland_stop(&server);
 #endif
+	ctl_stop(&server);
 	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_xcursor_manager_destroy(server.cursor_mgr);

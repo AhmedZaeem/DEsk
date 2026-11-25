@@ -55,6 +55,19 @@ One `key = value` per line; `#` starts a comment.
 | `throw_closed_windows` | `yes`, `no` | `yes` | Crumple a closed window and throw it away. |
 | `corner_on_hover` | `yes`, `no` | `yes` | Turn a corner up when the pointer rests on it (otherwise only on a click). |
 
+### Tiling, stacks and key binds
+
+| Key | Values | Default | |
+| --- | --- | --- | --- |
+| `tiling` | `yes`, `no` | `no` | Lay the open sheets of the stack out side by side ([TILING.md](TILING.md)). |
+| `tiling_layout` | `master`, `dwindle`, `columns`, `monocle` | `master` | |
+| `tiling_ratio` | `0.1` to `0.9` | `0.55` | The first split's share. |
+| `tiling_gap` | points, `0` to `64` | `6` | Between sheets and round the edge. |
+| `workspaces_wrap` | `yes`, `no` | `yes` | Next from stack 10 is stack 1. |
+| `ui_style` | `desk`, `redronin` | `desk` | `redronin`: the sheet with the keys carries a vermilion seal, and the clock shows the stack. |
+| `bind_defaults` | `desk`, `redronin` | `desk` | `redronin` adds the Red Ronin key set under your own binds. |
+| `bind` | `KEYS ACTION` | | Repeatable. `bind = SUPER+T exec kitty`; every action is in [TILING.md](TILING.md). |
+
 ### The desk
 
 | Key | Values | Default | |
@@ -66,7 +79,7 @@ One `key = value` per line; `#` starts a comment.
 | `camera_bounce` | `normal`, `low`, `off` | `normal` | How far the view swings past and settles. |
 | `language` | `auto`, `en`, `ja`, `zh`, `ko`, `es`, `fr`, `de` | `auto` | The desk's words and the names programs are filed under. `auto` follows `LC_ALL`, `LC_MESSAGES`, `LANG`. |
 | `clock` | `24h`, `12h` | `24h` | |
-| `desk_wood` | `walnut`, `oak`, `cherry`, `maple`, `ebony`, `leather`, `linoleum` | `walnut` | What the desk is made of: its top, sides and drawer. `leather` (green, tooled in gold) and `linoleum` (grey-green) are let into a walnut rim. The bookcase and the console stay walnut. The room is traced again for another, which takes a moment. |
+| `desk_wood` | `walnut`, `oak`, `cherry`, `maple`, `ebony`, `negoro`, `leather`, `linoleum` | `walnut` | What the desk is made of: its top, sides and drawer. `leather` (green, tooled in gold) and `linoleum` (grey-green) are let into a walnut rim. The bookcase and the console stay walnut. The room is traced again for another, which takes a moment. |
 | `desk_stain` | `natural`, `honey`, `brown`, `dark`, `grey` | `natural` | Over the desk's wood, the grain showing through. Ebony is not stained `brown` or `dark` (on black they are one colour): either is taken as `natural` on it. |
 | `desk_mat` | `none`, `green`, `navy`, `burgundy`, `charcoal`, `cream`, `#rrggbb`, `photo`, `clear` | `none` | A mat on the desk, under the windows. A colour is felt; `photo` lays the picture in `desk_mat_photo`; `clear` is a clear sheet over all the open desk, with pictures under it (`desk_mat_under`, [The clear mat](#the-clear-mat)). |
 | `desk_mat_photo` | an absolute path | (none) | The picture for `desk_mat = photo`, and for a clear mat with `desk_mat_under = whole`; Shell Settings' "The mat's picture" chooses one (`desk-mat pick --whole`). A PNG of up to 4 megapixels is read by DEsk itself; a larger one, and JPEG, WebP and the rest, by gdk-pixbuf's thumbnailer (or ImageMagick for `.png`, `.jpg`, `.webp`, `.gif`, `.bmp` and `.tif`), each in a process of its own. It must be a regular file of up to 64 MB (a PNG up to 48 megapixels). Until it is read, or if it can't be (the log says), the mat is charcoal cloth; it is tried again when the settings are applied again. |

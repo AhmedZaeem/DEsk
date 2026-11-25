@@ -1498,6 +1498,7 @@ enum desk_wood {
 	DESK_WOOD_CHERRY,
 	DESK_WOOD_MAPLE,
 	DESK_WOOD_EBONY,      /* black, the grain showing through */
+	DESK_WOOD_NEGORO,     /* black lacquer worn through to vermilion (Red Ronin) */
 	DESK_WOOD_COUNT,
 };
 enum desk_stain {
@@ -1588,12 +1589,20 @@ struct desk_clock_state {
 	 * 5 ready */
 	double boot;
 	int boot_stage;
+	/* Red Ronin: the stack the desk is on, 1..10, shown on the TIME page as
+	 * a lit numeral (0: not shown); and whether its sheets are tiled */
+	int ws;
+	bool tiling;
 };
 /* What the clock does on a day kept: says so, and the rest of its show */
 enum { DESK_SHOW_NONE = 0, DESK_SHOW_BIRTHDAY, DESK_SHOW_XMAS, DESK_SHOW_NEWYEAR,
 	DESK_SHOW_MIDNIGHT };
 #define DESK_SHOW_BEAT 0.60   /* the birthday's metronome, seconds a beat */
 void desk_clock_set(const struct desk_clock_state *st);
+/* Red Ronin's look (shell.conf ui_style = redronin): the sheet with the keys
+ * stamped with a vermilion seal, its rule in vermilion (desk_draw_window_frame) */
+void desk_set_ronin_style(bool on);
+bool desk_ronin_style(void);
 /* Changes exactly when the face would come out different. */
 uint64_t desk_clock_key(time_t now);
 /* In how many milliseconds the face will come out different of itself --

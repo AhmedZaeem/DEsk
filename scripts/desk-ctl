@@ -16,6 +16,12 @@
 #                           and calendar keep theirs).
 #   desk-ctl calculator     the calculator out of the drawer onto the desk (what
 #                           its line on the shelves runs).
+#   desk-ctl do ACTION      what a key bind does, now: focus left, move right,
+#                           workspace 3, movetoworkspace 2, tiling toggle,
+#                           layout dwindle, ratio +0.05, float, exec CMD ...
+#                           (docs/TILING.md has them all)
+#   desk-ctl query          the stack, the tiling and every window, as JSON
+#   desk-ctl binds          every key bind in force, one a line
 #
 # From a terminal on the desk, or -- when the desk will not answer at all --
 # from another VT (Ctrl+Alt+F3, logged in as the same user).
@@ -42,6 +48,10 @@ if [ -z "$pid" ] || [ "$(cat "/proc/$pid/comm" 2>/dev/null)" != desk ]; then
 fi
 
 case "${1:-}" in
+do | query | binds)
+	# through the desk's control socket (desk --ctl), not a signal
+	exec desk --ctl "$@"
+	;;
 reset)
 	kill -USR1 "$pid"
 	echo "DEsk: set right again."

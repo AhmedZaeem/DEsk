@@ -3185,6 +3185,13 @@ static const struct wood DESK_WOODS[DESK_WOOD_COUNT] = {
 	[DESK_WOOD_EBONY] = { { 0.120, 0.074, 0.042 }, { 0.011, 0.008, 0.006 },
 		{ 0.85, 0.30, 0.85, 0.30 }, { 0.016, 0.012, 0.009 }, 46.0, 7.0, { 0.090, 0.062, 0.040 }, 0.25,
 		2.6, 1.15, { 0.110, 0.080, 0.056 }, 0.30 },
+	/* negoro-nuri (根来塗): black urushi over vermilion, worn through where
+	 * hands and years have rubbed it, the red showing in streaks that
+	 * wander along the board as ebony's stripes do -- Red Ronin's ink-black
+	 * and crimson. The sun leaves the red browner, not paler. */
+	[DESK_WOOD_NEGORO] = { { 0.150, 0.012, 0.008 }, { 0.008, 0.006, 0.007 },
+		{ 0.70, 0.30, 0.85, 0.30 }, { 0.016, 0.008, 0.007 }, 46.0, 7.0, { 0.220, 0.018, 0.012 }, 0.25,
+		2.2, 0.55, { 0.120, 0.035, 0.028 }, 0.30 },
 };
 
 static _Atomic int g_desk_wood = DESK_WOOD_WALNUT, g_desk_stain = DESK_STAIN_NATURAL;
@@ -3212,7 +3219,7 @@ static unsigned bake_look(void)
 }
 
 static const char *const WOOD_NAMES[DESK_WOOD_COUNT] = { "walnut", "oak", "cherry", "maple",
-	"ebony" };
+	"ebony", "negoro" };
 static const char *const STAIN_NAMES[DESK_STAIN_COUNT] = { "natural", "honey", "brown", "dark",
 	"grey" };
 
@@ -3248,7 +3255,9 @@ bool desk_stain_offered(int wood, int stain)
 	if (stain < 0 || stain >= DESK_STAIN_COUNT) {
 		return false;
 	}
-	return wood != DESK_WOOD_EBONY || (stain != DESK_STAIN_BROWN && stain != DESK_STAIN_DARK);
+	/* (nor lacquer, which takes no stain into it) */
+	return (wood != DESK_WOOD_EBONY && wood != DESK_WOOD_NEGORO)
+		|| (stain != DESK_STAIN_BROWN && stain != DESK_STAIN_DARK);
 }
 
 bool desk_set_wood(int wood, int stain)
@@ -13667,6 +13676,71 @@ static void sheet_edge(cairo_t *cr, double x, double y, double w, double h)
 	cairo_restore(cr);
 }
 
+/* ---- Red Ronin: the seal on the sheet being written on ----
+ *
+ * In Red Ronin's look (shell.conf ui_style = redronin) the sheet with the
+ * keys is the one stamped: a vermilion seal (hanko) at the left of its
+ * heading, the character cut out of it so the paper shows (hakubun), its ink
+ * uneven as a seal pressed by hand is, and the rule under the heading drawn
+ * in the same vermilion. The others carry none: the seal is the focus. The
+ * character is 浪, the ro of ronin (浪人), a masterless samurai. */
+
+static _Atomic bool g_ronin_style;
+
+void desk_set_ronin_style(bool on)
+{
+	atomic_store(&g_ronin_style, on);
+}
+
+bool desk_ronin_style(void)
+{
+	return atomic_load(&g_ronin_style);
+}
+
+#define RONIN_SEAL_INK 0.78, 0.09, 0.08    /* shu: cinnabar seal paste */
+
+static void ronin_seal(cairo_t *cr, double cx, double cy, double s, const char *title)
+{
+	/* the same sheet is stamped the same way every time it is drawn */
+	uint32_t seed = 2166136261u;
+	for (const char *p = title ? title : ""; *p; p++) {
+		seed = (seed ^ (unsigned char)*p) * 16777619u;
+	}
+	double tilt = ((double)(seed % 1000) / 1000.0 - 0.5) * 0.10;   /* +-3 degrees */
+	cairo_save(cr);
+	cairo_translate(cr, cx, cy);
+	cairo_rotate(cr, tilt);
+	/* the seal's face, its corners a little round and its edge a little worn */
+	desk_rounded(cr, -s / 2, -s / 2, s, s, s * 0.10);
+	cairo_set_source_rgba(cr, RONIN_SEAL_INK, 0.90);
+	cairo_fill_preserve(cr);
+	cairo_set_line_width(cr, 0.8);
+	cairo_set_source_rgba(cr, 0.55, 0.04, 0.04, 0.55);
+	cairo_stroke(cr);
+	/* the character, cut out: paper where it is */
+	show_text_fit_as(cr, DESK_FONT_DISPLAY, "\xE6\xB5\xAA", 0.0, s * 0.30, s * 0.78, true,
+		0.95, 0.92, 0.86, 0.97, 0, s * 0.92);
+	/* where the paste did not take: small clear specks, and a thin one
+	 * along an edge, as a real impression has */
+	cairo_new_path(cr);   /* (the text leaves a current point behind) */
+	uint32_t r = seed | 1u;
+	for (int i = 0; i < 26; i++) {
+		r ^= r << 13;
+		r ^= r >> 17;
+		r ^= r << 5;
+		double px = ((double)(r & 0xffff) / 65535.0 - 0.5) * s * 0.92;
+		double py = ((double)(r >> 16) / 65535.0 - 0.5) * s * 0.92;
+		double pr = 0.35 + (double)(r % 7) * 0.12;
+		cairo_arc(cr, px, py, pr, 0, 2 * M_PI);
+		cairo_set_source_rgba(cr, 0.95, 0.92, 0.86, 0.55);
+		cairo_fill(cr);
+	}
+	cairo_rectangle(cr, -s / 2, s / 2 - 1.6, s * (0.35 + (seed % 40) / 100.0), 1.6);
+	cairo_set_source_rgba(cr, 0.95, 0.92, 0.86, 0.45);
+	cairo_fill(cr);
+	cairo_restore(cr);
+}
+
 void desk_draw_window_frame(cairo_t *cr, double x, double y, double w, double h,
 	const char *title, bool focused, int hover_btn, bool with_shadow)
 {
@@ -13686,20 +13760,29 @@ void desk_draw_window_frame(cairo_t *cr, double x, double y, double w, double h,
 	cairo_clip(cr);
 	double ink = focused ? 1.0 : 0.0;
 	double rule_y = y + DESK_TITLE_H - 7.0;
-	cairo_set_line_width(cr, 1.0);
-	cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.30 + 0.22 * ink);
+	bool ronin = desk_ronin_style();
+	cairo_set_line_width(cr, ronin && focused ? 1.4 : 1.0);
+	if (ronin && focused) {
+		cairo_set_source_rgba(cr, RONIN_SEAL_INK, 0.85);
+	} else {
+		cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.30 + 0.22 * ink);
+	}
 	cairo_move_to(cr, x + 16.0, rule_y + 0.5);
 	cairo_line_to(cr, x + w - 16.0, rule_y + 0.5);
 	cairo_stroke(cr);
+	if (ronin && focused && w >= 220.0) {
+		ronin_seal(cr, x + 16.0 + 13.0, y + DESK_TITLE_H * 0.5 - 1.0, 22.0, title);
+	}
 	cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.16 + 0.12 * ink);
 	cairo_move_to(cr, x + 16.0, rule_y + 3.5);
 	cairo_line_to(cr, x + w - 16.0, rule_y + 3.5);
 	cairo_stroke(cr);
 	if (title) {
-		/* clear of the turned-down corner at the right, and centred on
-		 * what is left */
-		double room = w - 32.0 - 60.0;
-		show_text_fit_as(cr, DESK_FONT_PRINT, title, x + 16.0 + room * 0.5,
+		/* clear of the turned-down corner at the right, and of the seal at
+		 * the left when there is one, and centred on what is left */
+		double seal = ronin && focused && w >= 220.0 ? 30.0 : 0.0;
+		double room = w - 32.0 - 60.0 - seal;
+		show_text_fit_as(cr, DESK_FONT_PRINT, title, x + 16.0 + seal + room * 0.5,
 			y + DESK_TITLE_H * 0.5 + 3.0,
 			14.0, true, 0.20, 0.16, 0.12, 0.52 + 0.40 * ink, 0, room);
 	}
@@ -33789,6 +33872,27 @@ static void clk_page_time(cairo_t *cr, const struct tm *tmv, double lit)
 		led_text(cr, g_clk.ime, rx + 13.0, cy - 7.5, 15.0, 0, lit, 21.0);
 	}
 	double vx = rx + (g_clk.ime[0] ? 38.0 : 0.0);
+	if (g_clk.ws >= 1 && g_clk.ws <= 10) {
+		/* the stack, as the formal numerals are written on a ledger
+		 * (daiji): 壱 弐 参 ... 拾; its box drawn whole while the sheets are
+		 * tiled, broken at the corners while they lie loose */
+		static const char *const DAIJI[10] = { "\xE5\xA3\xB1", "\xE5\xBC\x90", "\xE5\x8F\x82",
+			"\xE8\x82\x86", "\xE4\xBC\x8D", "\xE9\x99\xB8", "\xE6\xBC\x86", "\xE6\x8D\x8C",
+			"\xE7\x8E\x96", "\xE6\x8B\xBE" };
+		cairo_save(cr);
+		cairo_set_line_width(cr, 1.2);
+		if (g_clk.tiling) {
+			desk_rounded_path(cr, vx, cy - 11.0, 26.0, 22.0, 3.0);
+		} else {
+			cairo_set_dash(cr, (const double[]){ 6.0, 4.0 }, 2, 3.0);
+			desk_rounded_path(cr, vx, cy - 11.0, 26.0, 22.0, 3.0);
+		}
+		led_on(cr, 0.55 * lit);
+		cairo_stroke(cr);
+		cairo_restore(cr);
+		led_text(cr, DAIJI[g_clk.ws - 1], vx + 13.0, cy - 7.5, 15.0, 0, lit, 21.0);
+		vx += 38.0;
+	}
 	if (g_clk.have_volume) {
 		/* the blocks take what is left before the number */
 		double bw = fmax(x + CLK_WW - 8.0 - 46.0 - (vx + 24.0), 30.0);
@@ -34676,6 +34780,8 @@ uint64_t desk_clock_key(time_t now)
 	int v[3] = { g_clk.have_volume, (int)lround(g_clk.volume * 100.0), g_clk.muted };
 	CLK_MIX(v, sizeof v);
 	CLK_MIX(g_clk.ime, strlen(g_clk.ime));
+	int stack[2] = { g_clk.ws, g_clk.tiling };
+	CLK_MIX(stack, sizeof stack);
 	if (g_clk.mode == DESK_CLOCK_TIME) {
 		/* the hour and minute, the seconds (the colon's beat, a flat
 		 * battery's blink), and the camera and microphone lamps */

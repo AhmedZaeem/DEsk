@@ -1333,6 +1333,7 @@ enum desk_ovl {
 	DESK_OVL_MAT = 0,     /* the desk mat, under everything else on the desk; under a
 	                       * clear one, what is under it */
 	DESK_OVL_MAT_SHEET,   /* the clear mat itself, over what is under it */
+	DESK_OVL_ENSO,        /* Red Ronin: an empty stack's practice sheet, an enso on it */
 	DESK_OVL_CASES,       /* the things on the desk, rendered: under all the rest */
 	DESK_OVL_CLOCK,       /* the tray clock: a new face every minute */
 	DESK_OVL_ALLAPPS,     /* the plate on the screen's edge */
@@ -1366,6 +1367,7 @@ enum desk_mat_kind {
 	DESK_MAT_PHOTO,    /* a picture, cut to fill it */
 	DESK_MAT_CLEAR,    /* a clear sheet over all the open desk, the boards seen through it,
 	                    * and what is slipped under it (under) */
+	DESK_MAT_SHITAJIKI, /* Red Ronin: a calligrapher's felt underlay, its guide lines printed */
 };
 /* What lies under a clear mat. */
 enum desk_mat_under {
@@ -1602,6 +1604,9 @@ void desk_clock_set(const struct desk_clock_state *st);
 /* Red Ronin's look (shell.conf ui_style = redronin): the sheet with the keys
  * stamped with a vermilion seal, its rule in vermilion (desk_draw_window_frame) */
 void desk_set_ronin_style(bool on);
+/* Red Ronin: the stack (1..10) whose empty desk shows a practice sheet with an
+ * enso brushed on it (DESK_OVL_ENSO), or 0 for none. */
+void desk_set_enso(int ws);
 bool desk_ronin_style(void);
 /* Changes exactly when the face would come out different. */
 uint64_t desk_clock_key(time_t now);

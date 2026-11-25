@@ -230,9 +230,9 @@ static const char *const STAIN_WORDS[] = { "Natural", "Honey", "Brown", "Dark br
 static const char *const STAIN_VALS[] = { "natural", "honey", "brown", "dark", "grey" };
 /* the mat on the desk (shell.conf desk_mat, desk_mat_size) */
 static const char *const MAT_WORDS[] = { "None", "Green", "Navy", "Burgundy", "Charcoal", "Cream",
-	"Leather", "Linoleum", "Photo", "Clear", NULL };
+	"Leather", "Linoleum", "Shitajiki", "Photo", "Clear", NULL };
 static const char *const MAT_VALS[] = { "none", "green", "navy", "burgundy", "charcoal", "cream",
-	"leather", "linoleum", "photo", "clear" };
+	"leather", "linoleum", "shitajiki", "photo", "clear" };
 static const char *const MATSZ_WORDS[] = { "Small", "Medium", "Large", "Full", NULL };
 static const char *const MATSZ_VALS[] = { "small", "medium", "large", "full" };
 /* what lies under a clear one (desk_mat_under), and desk-mat asked for pictures

@@ -603,6 +603,7 @@ static const char *const WORDS[][DESK_LANG_COUNT] = {
 	{ "Negoro", "根来塗", "根来涂", "네고로 칠", "Laca negoro", "Laque negoro", "Negoro-Lack" },
 	{ "Leather", "革", "皮革", "가죽", "Cuero", "Cuir", "Leder" },
 	{ "Linoleum", "リノリウム", "油毡", "리놀륨", "Linóleo", "Linoléum", "Linoleum" },
+	{ "Shitajiki", "下敷き", "书法毡", "서예 깔개", "Fieltro de caligrafía", "Feutre de calligraphie", "Kalligrafiefilz" },
 	{ "Colour", "色", "颜色", "색", "Color", "Couleur", "Farbe" },
 	{ "A stain over the wood, the grain showing through.", "木に塗るステインです。木目は透けて見えます。",
 		"涂在木头上的着色剂，木纹会透出来。", "나무에 칠하는 스테인입니다. 나뭇결이 비쳐 보입니다.",

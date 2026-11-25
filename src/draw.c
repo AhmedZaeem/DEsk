@@ -13741,6 +13741,123 @@ static void ronin_seal(cairo_t *cr, double cx, double cy, double s, const char *
 	cairo_restore(cr);
 }
 
+/* ---- Red Ronin: washi, and a line brushed in sumi ----
+ *
+ * Washi is made of kozo, the long inner bark of the paper mulberry, and its
+ * fibres lie in the sheet where you can see them: thin pale threads, and a
+ * few darker, a little curled. They are scattered over a band of the sheet
+ * (its heading, where the window leaves the paper showing), the same way
+ * every time for the same seed. */
+
+static uint32_t ronin_rand(uint32_t *r)
+{
+	*r ^= *r << 13;
+	*r ^= *r >> 17;
+	*r ^= *r << 5;
+	return *r;
+}
+
+static double ronin_unit(uint32_t *r)
+{
+	return (double)(ronin_rand(r) & 0xffffff) / 16777215.0;
+}
+
+static uint32_t ronin_seed(const char *s)
+{
+	uint32_t seed = 2166136261u;
+	for (const char *p = s ? s : ""; *p; p++) {
+		seed = (seed ^ (unsigned char)*p) * 16777619u;
+	}
+	return seed | 1u;
+}
+
+static void washi_fibres(cairo_t *cr, double x, double y, double w, double h, uint32_t seed,
+	double per_kpx, int most)
+{
+	if (w < 4.0 || h < 4.0) {
+		return;
+	}
+	int n = (int)fmin((double)most, w * h / 1000.0 * per_kpx);
+	uint32_t r = seed | 1u;
+	cairo_save(cr);
+	cairo_rectangle(cr, x, y, w, h);
+	cairo_clip(cr);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	for (int i = 0; i < n; i++) {
+		double px = x + ronin_unit(&r) * w, py = y + ronin_unit(&r) * h;
+		double len = 4.0 + 20.0 * ronin_unit(&r) * ronin_unit(&r);
+		double a = ronin_unit(&r) * 2.0 * M_PI, ca = cos(a), sa = sin(a);
+		double bend = (ronin_unit(&r) - 0.5) * len * 0.7;
+		cairo_move_to(cr, px, py);
+		cairo_curve_to(cr, px + ca * len * 0.33 - sa * bend, py + sa * len * 0.33 + ca * bend,
+			px + ca * len * 0.66 + sa * bend * 0.5, py + sa * len * 0.66 - ca * bend * 0.5,
+			px + ca * len, py + sa * len);
+		if (ronin_unit(&r) < 0.68) {
+			cairo_set_source_rgba(cr, 1.0, 0.995, 0.97, 0.30 + 0.30 * ronin_unit(&r));
+			cairo_set_line_width(cr, 0.45 + 0.65 * ronin_unit(&r));
+		} else {
+			cairo_set_source_rgba(cr, 0.50, 0.43, 0.33, 0.10 + 0.10 * ronin_unit(&r));
+			cairo_set_line_width(cr, 0.35 + 0.35 * ronin_unit(&r));
+		}
+		cairo_stroke(cr);
+	}
+	cairo_restore(cr);
+}
+
+/* A line drawn with a brush, left to right: pressed down at the start,
+ * carried, and lifted at the end, where the brush runs dry and the paper
+ * shows through the stroke in streaks (kasure). */
+static void sumi_rule(cairo_t *cr, double x0, double x1, double y, double thick, uint32_t seed,
+	double cr_, double cg, double cb, double ca)
+{
+	if (x1 - x0 < 8.0) {
+		return;
+	}
+	enum { N = 56 };
+	double top[N + 1], bot[N + 1], xs[N + 1];
+	uint32_t r = seed | 1u;
+	double ph = ronin_unit(&r) * 6.0, tilt = (ronin_unit(&r) - 0.5) * 0.9;
+	for (int i = 0; i <= N; i++) {
+		double t = (double)i / N;
+		double p = t < 0.05 ? 0.70 + 0.45 * (t / 0.05)
+			: t < 0.78 ? 1.15 - 0.35 * (t - 0.05) / 0.73
+			: fmax(0.10, 0.80 - 0.70 * (t - 0.78) / 0.22);
+		double wob = 0.30 * sin(t * 9.0 + ph) + tilt * t;
+		xs[i] = x0 + (x1 - x0) * t;
+		top[i] = y + wob - thick * 0.5 * p;
+		bot[i] = y + wob + thick * 0.5 * p + (t < 0.05 ? 0.25 : 0.0);
+	}
+	cairo_save(cr);
+	cairo_move_to(cr, xs[0], top[0]);
+	for (int i = 1; i <= N; i++) {
+		cairo_line_to(cr, xs[i], top[i]);
+	}
+	for (int i = N; i >= 0; i--) {
+		cairo_line_to(cr, xs[i], bot[i]);
+	}
+	cairo_close_path(cr);
+	cairo_set_source_rgba(cr, cr_, cg, cb, ca);
+	cairo_fill(cr);
+	/* the head of the stroke, where the brush was set down */
+	cairo_arc(cr, x0 + thick * 0.2, (top[0] + bot[0]) * 0.5, thick * 0.62, 0, 2.0 * M_PI);
+	cairo_fill(cr);
+	/* and the dry streaks in its tail, in the paper's own colour */
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	for (int k = 0; k < 3; k++) {
+		double t0 = 0.58 + 0.20 * ronin_unit(&r);
+		double off = (ronin_unit(&r) - 0.5) * 0.55;
+		int i0 = (int)(t0 * N);
+		cairo_move_to(cr, xs[i0], (top[i0] + bot[i0]) * 0.5 + off * (bot[i0] - top[i0]));
+		for (int i = i0 + 1; i <= N; i++) {
+			cairo_line_to(cr, xs[i], (top[i] + bot[i]) * 0.5 + off * (bot[i] - top[i]));
+		}
+		cairo_set_source_rgba(cr, 0.95, 0.92, 0.85, 0.80);
+		cairo_set_line_width(cr, fmax(0.4, thick * 0.16));
+		cairo_stroke(cr);
+	}
+	cairo_restore(cr);
+}
+
 void desk_draw_window_frame(cairo_t *cr, double x, double y, double w, double h,
 	const char *title, bool focused, int hover_btn, bool with_shadow)
 {
@@ -13761,22 +13878,30 @@ void desk_draw_window_frame(cairo_t *cr, double x, double y, double w, double h,
 	double ink = focused ? 1.0 : 0.0;
 	double rule_y = y + DESK_TITLE_H - 7.0;
 	bool ronin = desk_ronin_style();
-	cairo_set_line_width(cr, ronin && focused ? 1.4 : 1.0);
-	if (ronin && focused) {
-		cairo_set_source_rgba(cr, RONIN_SEAL_INK, 0.85);
+	if (ronin) {
+		/* washi: its fibres in the heading; and under it, one line brushed
+		 * in sumi -- in the seal's vermilion on the sheet being written on */
+		uint32_t seed = ronin_seed(title);
+		washi_fibres(cr, x, y, w, DESK_TITLE_H, seed, 1.6, 140);
+		if (focused) {
+			sumi_rule(cr, x + 16.0, x + w - 16.0, rule_y + 1.5, 2.8, seed, RONIN_SEAL_INK, 0.88);
+		} else {
+			sumi_rule(cr, x + 16.0, x + w - 16.0, rule_y + 1.5, 2.2, seed, 0.11, 0.09, 0.08, 0.55);
+		}
+		if (focused && w >= 220.0) {
+			ronin_seal(cr, x + 16.0 + 13.0, y + DESK_TITLE_H * 0.5 - 1.0, 22.0, title);
+		}
 	} else {
+		cairo_set_line_width(cr, 1.0);
 		cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.30 + 0.22 * ink);
+		cairo_move_to(cr, x + 16.0, rule_y + 0.5);
+		cairo_line_to(cr, x + w - 16.0, rule_y + 0.5);
+		cairo_stroke(cr);
+		cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.16 + 0.12 * ink);
+		cairo_move_to(cr, x + 16.0, rule_y + 3.5);
+		cairo_line_to(cr, x + w - 16.0, rule_y + 3.5);
+		cairo_stroke(cr);
 	}
-	cairo_move_to(cr, x + 16.0, rule_y + 0.5);
-	cairo_line_to(cr, x + w - 16.0, rule_y + 0.5);
-	cairo_stroke(cr);
-	if (ronin && focused && w >= 220.0) {
-		ronin_seal(cr, x + 16.0 + 13.0, y + DESK_TITLE_H * 0.5 - 1.0, 22.0, title);
-	}
-	cairo_set_source_rgba(cr, 0.30, 0.24, 0.17, 0.16 + 0.12 * ink);
-	cairo_move_to(cr, x + 16.0, rule_y + 3.5);
-	cairo_line_to(cr, x + w - 16.0, rule_y + 3.5);
-	cairo_stroke(cr);
 	if (title) {
 		/* clear of the turned-down corner at the right, and of the seal at
 		 * the left when there is one, and centred on what is left */
@@ -35831,6 +35956,7 @@ static bool clk_face_box(int w, int h, double box[4])
 }
 
 static bool mat_box(int w, int h, double box[4]);
+static bool enso_box(int w, int h, double box[4]);
 static bool sheet_box(int w, int h, double box[4]);
 
 bool desk_overlay_box(int which, int w, int h, double box[4])
@@ -35840,6 +35966,9 @@ bool desk_overlay_box(int which, int w, int h, double box[4])
 	}
 	if (which == DESK_OVL_MAT_SHEET) {
 		return sheet_box(w, h, box);
+	}
+	if (which == DESK_OVL_ENSO) {
+		return enso_box(w, h, box);
 	}
 	if (which == DESK_OVL_SLIPS) {
 		return slips_box(w, h, box);
@@ -40895,6 +41024,63 @@ void desk_draw_gadgets(cairo_t *cr, int w, int h, time_t now, double drawer_open
 	}
 }
 
+/* ---- Red Ronin: the shitajiki's printed guide lines ----
+ *
+ * A shitajiki is the felt laid under the paper in shodo, and the better ones
+ * are printed with faint lines to set the sheet and the characters by: a
+ * grid of squares, a little heavier every fourth, and the frame of a hanshi
+ * sheet (242 x 333 mm) marked at its corners, in the middle. */
+static void enso_sheet(int w, int h, double s[4]);
+
+static void shitajiki_lines(cairo_t *cr, double x, double y, double w, double h, double k,
+	int sw_px, int sh_px)
+{
+	double cx = x + w * 0.5, cy = y + h * 0.5;
+	double step = 36.0 * k;
+	if (step < 6.0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_set_line_width(cr, fmax(0.6, 0.7 * k));
+	int nx = (int)(w * 0.5 / step) + 1, ny = (int)(h * 0.5 / step) + 1;
+	for (int i = -nx; i <= nx; i++) {
+		double lx = floor(cx + i * step) + 0.5;
+		cairo_move_to(cr, lx, y);
+		cairo_line_to(cr, lx, y + h);
+		cairo_set_source_rgba(cr, 0.72, 0.74, 0.82, i % 4 == 0 ? 0.10 : 0.05);
+		cairo_stroke(cr);
+	}
+	for (int j = -ny; j <= ny; j++) {
+		double ly = floor(cy + j * step) + 0.5;
+		cairo_move_to(cr, x, ly);
+		cairo_line_to(cr, x + w, ly);
+		cairo_set_source_rgba(cr, 0.72, 0.74, 0.82, j % 4 == 0 ? 0.10 : 0.05);
+		cairo_stroke(cr);
+	}
+	/* the hanshi's corners, a little outside where an empty stack's sheet
+	 * lies, when that is on the mat */
+	double es[4];
+	enso_sheet(sw_px, sh_px, es);
+	double sh = es[3] * 1.07, sw = es[2] * 1.07;
+	double hx = es[0] + es[2] * 0.5 - sw * 0.5, hy = es[1] + es[3] * 0.5 - sh * 0.5, arm = 22.0 * k;
+	if (hx < x || hy < y || hx + sw > x + w || hy + sh > y + h) {
+		cairo_restore(cr);
+		return;
+	}
+	cairo_set_line_width(cr, fmax(0.8, 1.1 * k));
+	cairo_set_source_rgba(cr, 0.82, 0.84, 0.90, 0.16);
+	const double cs[4][2] = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
+	for (int c = 0; c < 4; c++) {
+		double px = hx + sw * cs[c][0], py = hy + sh * cs[c][1];
+		double dx = cs[c][0] ? -arm : arm, dy = cs[c][1] ? -arm : arm;
+		cairo_move_to(cr, px + dx, py);
+		cairo_line_to(cr, px, py);
+		cairo_line_to(cr, px, py + dy);
+		cairo_stroke(cr);
+	}
+	cairo_restore(cr);
+}
+
 /* ---- the desk mat -------------------------------------------------
  *
  * A sprite of its own (DESK_OVL_MAT) over the baked room and under everything
@@ -40913,6 +41099,8 @@ static const struct {
 	/* green morocco, as a writing desk's; and office linoleum, grey-green */
 	{ "leather", DESK_MAT_LEATHER, { 0.20f, 0.36f, 0.24f } },
 	{ "linoleum", DESK_MAT_LINOLEUM, { 0.50f, 0.55f, 0.46f } },
+	/* Red Ronin: the felt a calligrapher lays the paper on, indigo-black */
+	{ "shitajiki", DESK_MAT_SHITAJIKI, { 0.060f, 0.064f, 0.095f } },
 };
 
 bool desk_mat_preset(const char *name, struct desk_mat *out)
@@ -41491,7 +41679,8 @@ static void mat_paint_flat(cairo_t *cr, int w, int h)
 	/* felt's corners well rounded; leather's turned over a board, less;
 	 * linoleum cut from the roll */
 	double x = r[0], y = r[1], mw = r[2], mh = r[3];
-	double rad = (m.kind == DESK_MAT_LEATHER ? 7.0 : m.kind == DESK_MAT_LINOLEUM ? 2.5 : 12.0) * k;
+	double rad = (m.kind == DESK_MAT_LEATHER ? 7.0
+		: m.kind == DESK_MAT_LINOLEUM || m.kind == DESK_MAT_SHITAJIKI ? 2.5 : 12.0) * k;
 	double lift = mat_lift(w);
 
 	/* Its shadow, as the windows' are: each edge leans away from the lamp by what
@@ -41558,6 +41747,9 @@ static void mat_paint_flat(cairo_t *cr, int w, int h)
 			cairo_paint(cr);
 			cairo_pattern_destroy(pat);
 			overlay_grain(cr, x, y, mw, mh, 0.8);
+		} else if (m.kind == DESK_MAT_SHITAJIKI) {
+			overlay_grain(cr, x, y, mw, mh, 1.6);
+			shitajiki_lines(cr, x, y, mw, mh, k, w, h);
 		} else {
 			/* felt: a nap you can see, and nothing shiny */
 			overlay_grain(cr, x, y, mw, mh, 1.6);
@@ -41623,7 +41815,7 @@ static void mat_paint_flat(cairo_t *cr, int w, int h)
 		}
 		return;
 	}
-	if (m.kind == DESK_MAT_LINOLEUM) {
+	if (m.kind == DESK_MAT_LINOLEUM || m.kind == DESK_MAT_SHITAJIKI) {
 		/* cut square from the roll: nothing round its edge but the edge */
 		if (pic) {
 			cairo_surface_destroy(pic);
@@ -41681,7 +41873,8 @@ static unsigned g_flat_room;
 bool desk_mat_rolls(const struct desk_mat *m)
 {
 	return m && (m->kind == DESK_MAT_COLOR || m->kind == DESK_MAT_LEATHER
-		|| m->kind == DESK_MAT_LINOLEUM || m->kind == DESK_MAT_PHOTO);
+		|| m->kind == DESK_MAT_LINOLEUM || m->kind == DESK_MAT_PHOTO
+		|| m->kind == DESK_MAT_SHITAJIKI);
 }
 
 void desk_mat_unroll(double t)
@@ -43068,6 +43261,171 @@ cairo_surface_t *desk_mat_envelope_picture(int w, int h, int corner, double cut,
 	return s;
 }
 
+/* ---- Red Ronin: an empty stack ------------------------------------
+ *
+ * When the stack the desk is on has nothing open, a sheet of hanshi (the
+ * practice paper of shodo, 242 x 333 mm) lies in the middle of the desk with
+ * an enso brushed on it: the circle drawn in one breath, open where the
+ * brush left the paper, dry at its end; inside it, the stack's number in
+ * ledger numerals (daiji), and at the side the brush's name, 浪人, and its
+ * seal. wm.c says which stack, and only in Red Ronin's look. */
+
+static _Atomic int g_enso_ws;
+
+void desk_set_enso(int ws)
+{
+	atomic_store(&g_enso_ws, ws >= 1 && ws <= 10 ? ws : 0);
+}
+
+static const char *const RONIN_DAIJI[10] = { "\xE5\xA3\xB1", "\xE5\xBC\x90", "\xE5\x8F\x82",
+	"\xE8\x82\x86", "\xE4\xBC\x8D", "\xE9\x99\xB8", "\xE6\xBC\x86", "\xE6\x8D\x8C",
+	"\xE7\x8E\x96", "\xE6\x8B\xBE" };
+
+#define ENSO_TILT (-0.028)   /* laid down a little crooked, as a sheet is */
+
+/* the sheet, unturned: x, y, w, h */
+static void enso_sheet(int w, int h, double s[4])
+{
+	double r[4];
+	mat_rect(w, h, DESK_MAT_FULL, r);
+	double k = desk_px_per_pt(w);
+	double sh = fmin(r[3] * 0.72, 560.0 * k), sw = sh * 242.0 / 333.0;
+	s[0] = r[0] + (r[2] - sw) * 0.5;
+	s[1] = r[1] + (r[3] - sh) * 0.5;
+	s[2] = sw;
+	s[3] = sh;
+}
+
+static bool enso_box(int w, int h, double box[4])
+{
+	if (!atomic_load(&g_enso_ws)) {
+		box[0] = box[1] = box[2] = box[3] = 0.0;   /* nothing: no picture at all */
+		return true;
+	}
+	double s[4], pad = 60.0 * desk_px_per_pt(w);
+	enso_sheet(w, h, s);
+	box[0] = floor(fmax(0.0, s[0] - pad));
+	box[1] = floor(fmax(0.0, s[1] - pad));
+	box[2] = ceil(fmin((double)w, s[0] + s[2] + pad)) - box[0];
+	box[3] = ceil(fmin((double)h, s[1] + s[3] + pad)) - box[1];
+	return true;
+}
+
+/* the circle, as one stroke: fat where the brush went down, thinning, and
+ * lifted dry before it closes */
+static void enso_stroke(cairo_t *cr, double cx, double cy, double R, double W, uint32_t seed)
+{
+	enum { N = 240 };
+	double ox[N + 1], oy[N + 1], ix[N + 1], iy[N + 1], mx[N + 1], my[N + 1], hw[N + 1];
+	uint32_t r = seed | 1u;
+	double p1 = ronin_unit(&r) * 6.0, p2 = ronin_unit(&r) * 6.0;
+	double a0 = 115.0 * M_PI / 180.0, sweep = 2.0 * M_PI * 0.90;
+	for (int i = 0; i <= N; i++) {
+		double t = (double)i / N, a = a0 + sweep * t;
+		double rr = R * (1.0 + 0.030 * sin(2.0 * a + p1) + 0.014 * sin(5.0 * a + p2)
+			+ 0.045 * t * t * t);
+		double p = t < 0.04 ? 0.75 + 0.50 * (t / 0.04)
+			: t < 0.70 ? 1.25 - 0.40 * (t - 0.04) / 0.66
+			: fmax(0.10, 0.85 - 0.75 * (t - 0.70) / 0.30);
+		hw[i] = W * 0.5 * p;
+		mx[i] = cx + cos(a) * rr;
+		my[i] = cy + sin(a) * rr;
+		ox[i] = cx + cos(a) * (rr + hw[i]);
+		oy[i] = cy + sin(a) * (rr + hw[i]);
+		ix[i] = cx + cos(a) * (rr - hw[i]);
+		iy[i] = cy + sin(a) * (rr - hw[i]);
+	}
+	cairo_save(cr);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+	/* the ink as one layer, so where the blot and the stroke overlap it is
+	 * no darker: the stroke, the blot where the brush was set down, and the
+	 * ink spreading a little into the paper round it (nijimi) */
+	cairo_push_group(cr);
+	cairo_move_to(cr, ox[0], oy[0]);
+	for (int i = 1; i <= N; i++) {
+		cairo_line_to(cr, ox[i], oy[i]);
+	}
+	for (int i = N; i >= 0; i--) {
+		cairo_line_to(cr, ix[i], iy[i]);
+	}
+	cairo_close_path(cr);
+	cairo_set_source_rgb(cr, 0.065, 0.058, 0.056);
+	cairo_fill(cr);
+	cairo_arc(cr, mx[0], my[0], hw[0] * 1.05, 0, 2.0 * M_PI);
+	cairo_fill(cr);
+	cairo_pop_group_to_source(cr);
+	cairo_paint_with_alpha(cr, 0.93);
+	/* kasure: the brush running dry along the last of it -- the paper
+	 * showing through in broken streaks that wander across the stroke */
+	for (int k = 0; k < 18; k++) {
+		double t0 = 0.50 + 0.44 * ronin_unit(&r);
+		double t1 = fmin(1.0, t0 + 0.04 + 0.20 * ronin_unit(&r));
+		double off = (ronin_unit(&r) - 0.5) * 1.6, drift = (ronin_unit(&r) - 0.5) * 0.5;
+		int i0 = (int)(t0 * N), i1 = (int)(t1 * N);
+		if (i1 <= i0) {
+			continue;
+		}
+		for (int i = i0; i <= i1; i++) {
+			double f = off + drift * (double)(i - i0) / (double)(i1 - i0);
+			double px = mx[i] + (ox[i] - mx[i]) * f, py = my[i] + (oy[i] - my[i]) * f;
+			if (i == i0) {
+				cairo_move_to(cr, px, py);
+			} else {
+				cairo_line_to(cr, px, py);
+			}
+		}
+		cairo_set_source_rgba(cr, 0.95, 0.92, 0.85, 0.65 + 0.30 * ronin_unit(&r));
+		cairo_set_line_width(cr, fmax(0.6, W * (0.02 + 0.07 * ronin_unit(&r))));
+		cairo_stroke(cr);
+	}
+	cairo_restore(cr);
+}
+
+static void enso_paint(cairo_t *cr, int w, int h)
+{
+	int ws = atomic_load(&g_enso_ws);
+	if (!ws) {
+		return;
+	}
+	double s[4];
+	enso_sheet(w, h, s);
+	double sw = s[2], sh = s[3];
+	/* its shadow on the felt, then the sheet */
+	cairo_save(cr);
+	cairo_translate(cr, s[0] + sw * 0.5, s[1] + sh * 0.5);
+	cairo_rotate(cr, ENSO_TILT);
+	cairo_translate(cr, -sw * 0.5, -sh * 0.5);
+	desk_draw_window_shadow(cr, 0.0, 0.0, sw, sh, 2.0);
+	cairo_restore(cr);
+	cairo_push_group(cr);
+	cairo_save(cr);
+	cairo_translate(cr, s[0] + sw * 0.5, s[1] + sh * 0.5);
+	cairo_rotate(cr, ENSO_TILT);
+	cairo_translate(cr, -sw * 0.5, -sh * 0.5);
+	fill_paper(cr, 0.0, 0.0, sw, sh, 2.0);
+	washi_fibres(cr, 0.0, 0.0, sw, sh, 0x9e3779b9u + (uint32_t)ws, 0.9, 420);
+
+	double R = sw * 0.335, W = R * 0.24, cx = sw * 0.53, cy = sh * 0.43;
+	enso_stroke(cr, cx, cy, R, W, 0x51ed27u * (uint32_t)ws);
+	double size = R * 0.92;
+	show_text_fit_as(cr, DESK_FONT_DISPLAY, RONIN_DAIJI[ws - 1], cx, cy + size * 0.36, size, true,
+		0.065, 0.058, 0.056, 0.90, 0, R * 1.3);
+	/* the brush's name, down the left, and its seal under it */
+	double nsz = sw * 0.058, nx = sw * 0.13, ny = sh * 0.72;
+	show_text_fit_as(cr, DESK_FONT_PRINT, "\xE6\xB5\xAA", nx, ny, nsz, false,
+		0.10, 0.09, 0.09, 0.85, 0, nsz * 2.0);
+	show_text_fit_as(cr, DESK_FONT_PRINT, "\xE4\xBA\xBA", nx, ny + nsz * 1.15, nsz, false,
+		0.10, 0.09, 0.09, 0.85, 0, nsz * 2.0);
+	cairo_new_path(cr);
+	ronin_seal(cr, nx, ny + nsz * 2.35, nsz * 1.25, RONIN_DAIJI[ws - 1]);
+	cairo_restore(cr);
+	/* not under the lamp's multiply, as the mat is: the sheets on the desk
+	 * are not, and this one is to look like them */
+	cairo_pop_group_to_source(cr);
+	cairo_paint(cr);
+}
+
 /* ---- what lies over the desk, a sprite at a time ----------------
  *
  * The compositor used to repaint everything drawn over the baked desk --
@@ -43087,6 +43445,8 @@ uint64_t desk_overlay_key(int which, time_t now, int unread)
 		return mat_key();
 	case DESK_OVL_MAT_SHEET:
 		return sheet_key();
+	case DESK_OVL_ENSO:
+		return 1u + (uint64_t)atomic_load(&g_enso_ws) + (gfx_shadows() ? 16u : 0u);
 	case DESK_OVL_CLOCK:
 		return desk_clock_key(now);
 	case DESK_OVL_POST:
@@ -43118,6 +43478,9 @@ void desk_draw_overlay(cairo_t *cr, int which, int w, int h, time_t now, int unr
 		break;
 	case DESK_OVL_MAT_SHEET:
 		clear_sheet_paint(cr, w, h);
+		break;
+	case DESK_OVL_ENSO:
+		enso_paint(cr, w, h);
 		break;
 	case DESK_OVL_CASES:
 		if (room_xform(w, h, 0.0, &xf)) {

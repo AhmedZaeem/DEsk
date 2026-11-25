@@ -117,17 +117,30 @@ running. A bad action prints why on stderr.
 
 ## The Red Ronin look
 
-`ui_style = redronin` changes two things:
+`ui_style = redronin` makes the desk a calligrapher's (書道の机):
+- **Washi.** The sheets are washi: the kozo fibres show in their headings,
+  and the rule under the heading is one stroke of sumi, pressed down at the
+  left, lifted at the right, where the brush runs dry.
 - **The seal.** The sheet that has the keys is stamped with a vermilion
-  hanko at the left of its heading, and its rule is drawn in vermilion.
-  The seal is 浪, the *rō* of 浪人 (rōnin), with the character cut out so
-  the paper shows through (*hakubun*). Each window's seal is pressed a
-  little differently, and the same way every time that window is drawn.
-  The other sheets carry no seal: in this look, the seal *is* focus.
+  hanko at the left of its heading, and its stroke is in the same
+  vermilion. The seal is 浪, the *rō* of 浪人 (rōnin), with the character
+  cut out so the paper shows through (*hakubun*). Each window's seal is
+  pressed a little differently, and the same way every time that window is
+  drawn. The other sheets carry no seal: in this look, the seal *is* focus.
 - **The stack on the clock.** The clock's TIME page shows which stack you
   are on, in the formal numerals of a ledger (*daiji*):
   壱 弐 参 肆 伍 陸 漆 捌 玖 拾. Its box is drawn whole while the sheets are
   tiled, and dashed while they lie loose.
+- **An empty stack.** A stack with nothing open shows a sheet of *hanshi*,
+  the practice paper of shodō, in the middle of the desk, with an *ensō*
+  brushed on it: the circle drawn in one breath, open where the brush left
+  the paper, dry at its end. The stack's numeral is inside it, and 浪人 and
+  the seal are at its side. It goes as soon as anything is opened there.
+
+With it, lay the desk with `desk_mat = shitajiki` and `desk_mat_size =
+full` (the preset does): the indigo-black felt a calligrapher lays the
+paper on, printed with faint guide squares and the corners of a hanshi
+sheet.
 
 The clock shows the stack as soon as you use any of these features, even
 without `ui_style`.

@@ -15,11 +15,16 @@ Worktree `~/Projects/DEsk-redronin`, branch `redronin`, based on upstream
   - a vermilion hanko (浪) seal on the focused sheet;
   - the current stack on the clock in daiji (壱 弐 参 …).
 - **`negoro` desk wood**, black urushi lacquer worn through to vermilion.
+- **The calligrapher's desk** (`ui_style = redronin`):
+  - `desk_mat = shitajiki`, indigo felt with printed guide lines;
+  - washi headings, with kozo fibres and a sumi brush stroke for the rule;
+  - an empty stack shows a hanshi sheet with an ensō and the stack's
+    numeral (`"enso"` in `desk-ctl query`).
 - **Preset:** `packaging/redronin/shell.conf`, plus `fuzzel.ini`. Super+A
   opens the launcher; Super+/ opens the key cheat sheet.
 - **Tests:**
   - `meson test`: 5 suites;
-  - `tests/redronin/run.sh`: 27 checks;
+  - `tests/redronin/run.sh`: 30 checks;
   - `tests/redronin/run.sh layershell`: 9 checks.
 - **Reviews:** two independent reviews; every crash and behaviour finding
   has been fixed.

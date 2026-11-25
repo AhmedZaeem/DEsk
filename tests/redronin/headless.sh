@@ -18,6 +18,7 @@ weather = no
 tiling = yes
 tiling_gap = 8
 graphics = low
+ui_style = redronin
 bind_defaults = redronin
 bind = SUPER+Y exec true
 bind = SUPER+nosuchkey close
@@ -48,10 +49,12 @@ sleep 8
 grep -q 'bind = SUPER+nosuchkey' /out/desk.log 2>/dev/null; grep -q 'no key called "nosuchkey"' /out/desk.log \
 	&& pass "a bad bind is reported in the log" || fail "bad bind not reported"
 q | grep -q '"binds":[1-9]' && pass "binds loaded: $(q | grep -o '"binds":[0-9]*')" || fail "no binds"
+q | grep -q '"enso":1,' && pass "an empty stack 1 shows the enso" || fail "enso at start: $(q | grep -o '"enso":[0-9]*')"
 
 for t in one two three; do foot -T "$t" >/dev/null 2>&1 & done
 wait_windows 3; settle 3
 [ "$(count '"tiled":true')" -eq 3 ] && pass "3 windows tiled (master)" || fail "tiled: $(count '"tiled":true')"
+q | grep -q '"enso":0,' && pass "the enso goes when windows open" || fail "enso with windows: $(q | grep -o '"enso":[0-9]*')"
 q > /out/q-master.json; shot 01-master
 
 desk-ctl do layout dwindle >/dev/null; settle
@@ -90,6 +93,7 @@ desk-ctl do float >/dev/null; settle
 desk-ctl do workspace 2 >/dev/null; settle
 q | grep -q '"workspace":2,' && pass "on stack 2" || fail "not on stack 2"
 [ "$(count '"hidden":true')" -eq 3 ] && pass "stack 1's windows hidden" || fail "hidden: $(count '"hidden":true')"
+q | grep -q '"enso":2,' && pass "empty stack 2 shows its enso" || fail "enso on 2: $(q | grep -o '"enso":[0-9]*')"
 shot 07-ws2-empty
 foot -T four >/dev/null 2>&1 &
 wait_windows 4; settle 3

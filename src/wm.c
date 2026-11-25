@@ -1924,6 +1924,7 @@ struct desk_server {
 	enum tile_layout tile_layout;
 	double tile_ratio, tile_gap_pt;
 	uint64_t tile_sig;
+	int enso_ws;                 /* the stack the enso is shown for, 0 for none */
 	unsigned tile_seq;
 	int ctl_fd;
 	struct wl_event_source *ctl_src;
@@ -18323,7 +18324,7 @@ static void overlay_update(struct desk_server *server, bool force)
 	/* the things on the desk are what the rest over it lies on, and the mat
 	 * is what they lie on -- a clear one over what is under it -- whenever
 	 * their pictures were first put up */
-	static const int UNDER[] = { DESK_OVL_CASES, DESK_OVL_MAT_SHEET, DESK_OVL_MAT };
+	static const int UNDER[] = { DESK_OVL_CASES, DESK_OVL_ENSO, DESK_OVL_MAT_SHEET, DESK_OVL_MAT };
 	for (size_t i = 0; i < sizeof UNDER / sizeof UNDER[0]; i++) {
 		if (server->ovl[UNDER[i]].node) {
 			wlr_scene_node_lower_to_bottom(&server->ovl[UNDER[i]].node->node);
@@ -22935,6 +22936,32 @@ static void tile_release_all(struct desk_server *server, bool restore)
 
 #define TILE_MIX(h, x) ((h) = ((h) ^ (uint64_t)(x)) * 1099511628211ull)
 
+/* Red Ronin: a stack with nothing on the desk shows a practice sheet with an
+ * enso on it (draw.c, DESK_OVL_ENSO); anything open there, and it goes. */
+static void enso_tick(struct desk_server *server)
+{
+	int ws = 0;
+	if (desk_ronin_style()) {
+		ws = server->ws;
+		struct desk_toplevel *v;
+		wl_list_for_each(v, &server->toplevels, link) {
+			/* open, or folded into a packet still lying on the desk */
+			if (v->scene_tree && !v->unmanaged && !v->ime_popup && !v->ws_hidden
+				&& !v->sheet.in_drawer
+				&& (v->scene_tree->node.enabled || v->sheet.phase != SHEET_IDLE)) {
+				ws = 0;
+				break;
+			}
+		}
+	}
+	if (ws != server->enso_ws) {
+		server->enso_ws = ws;
+		desk_set_enso(ws);
+		overlay_update(server, false);
+		server_schedule_frames(server);
+	}
+}
+
 static void tile_tick(struct desk_server *server)
 {
 	/* the screens changed: layer surfaces placed again, or closed */
@@ -22957,6 +22984,7 @@ static void tile_tick(struct desk_server *server)
 		}
 	}
 	ws_enforce(server);
+	enso_tick(server);
 	struct desk_toplevel *v;
 	if (!server->tiling) {
 		if (server->tile_any) {
@@ -23646,10 +23674,10 @@ static void ctl_query(struct desk_server *server, FILE *f)
 	struct desk_toplevel *front = view_of_surface(server,
 		server->seat->keyboard_state.focused_surface);
 	fprintf(f, "{\"workspace\":%d,\"previous\":%d,\"tiling\":%s,\"layout\":\"%s\","
-		"\"ratio\":%.3f,\"gap\":%.1f,\"binds\":%d,\"windows\":[",
+		"\"ratio\":%.3f,\"gap\":%.1f,\"binds\":%d,\"enso\":%d,\"windows\":[",
 		server->ws, server->ws_back, server->tiling ? "true" : "false",
 		tile_layout_name(server->tile_layout), server->tile_ratio, server->tile_gap_pt,
-		server->conf.tile.n_binds);
+		server->conf.tile.n_binds, server->enso_ws);
 	bool first = true;
 	struct desk_toplevel *v;
 	wl_list_for_each_reverse(v, &server->toplevels, link) {

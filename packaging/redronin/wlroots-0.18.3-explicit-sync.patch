@@ -1,0 +1,132 @@
+--- a/types/wlr_linux_drm_syncobj_v1.c	2025-10-23 13:00:25.000000000 +0300
++++ b/types/wlr_linux_drm_syncobj_v1.c	2026-11-25 23:50:18.907288763 +0200
+@@ -212,15 +212,20 @@
+ 	surface_commit_destroy(commit);
+ }
+ 
+-// Block the surface commit until the fence materializes
++// Block the surface commit until the fence is signalled.
++//
++// DEsk/Red Ronin: upstream 0.18 waits only for the fence to materialize and
++// leaves waiting on it to the renderer, which 0.18's scene and GLES2 renderer
++// never do. The commit is held until the client's GPU work is done instead,
++// as implicit sync would give, so a buffer is never shown half drawn (NVIDIA
++// has no implicit sync).
+ static bool lock_surface_commit(struct wlr_linux_drm_syncobj_surface_v1 *surface,
+ 		struct wlr_drm_syncobj_timeline *timeline, uint64_t point) {
+-	uint32_t flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE;
+-
+-	bool already_materialized = false;
+-	if (!wlr_drm_syncobj_timeline_check(timeline, point, flags, &already_materialized)) {
++	bool already_signaled = false;
++	if (!wlr_drm_syncobj_timeline_check(timeline, point,
++			DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, &already_signaled)) {
+ 		return false;
+-	} else if (already_materialized) {
++	} else if (already_signaled) {
+ 		return true;
+ 	}
+ 
+@@ -233,7 +238,7 @@
+ 	struct wl_display *display = wl_client_get_display(client);
+ 	struct wl_event_loop *loop = wl_display_get_event_loop(display);
+ 	if (!wlr_drm_syncobj_timeline_waiter_init(&commit->waiter, timeline, point,
+-			flags, loop)) {
++			0, loop)) {
+ 		free(commit);
+ 		return false;
+ 	}
+@@ -250,6 +255,78 @@
+ 	return true;
+ }
+ 
++// DEsk/Red Ronin: the release point, signalled when the compositor lets go
++// of the buffer committed with it -- the moment wl_buffer.release would be
++// sent. Upstream 0.18 never signals it, and a client waiting on it stalls.
++struct syncobj_release {
++	struct wlr_drm_syncobj_timeline *timeline;
++	uint64_t point;
++	struct wl_listener buffer_release;
++	struct wl_listener buffer_destroy;
++};
++
++// The compositor's GPU may still be reading the buffer when its last lock
++// goes (a pass is only flushed): it gives a fence for the GL work submitted
++// so far, as a sync_file, and the release point is that fence; without one
++// (-1) the point is signalled at once.
++static int (*release_fence_fn)(void *data);
++static void *release_fence_data;
++
++void wlr_linux_drm_syncobj_v1_desk_set_release_fence(int (*fn)(void *data), void *data);
++void wlr_linux_drm_syncobj_v1_desk_set_release_fence(int (*fn)(void *data), void *data) {
++	release_fence_fn = fn;
++	release_fence_data = data;
++}
++
++static void syncobj_release_fire(struct syncobj_release *rel) {
++	int fence = release_fence_fn ? release_fence_fn(release_fence_data) : -1;
++	bool done = fence >= 0 &&
++		wlr_drm_syncobj_timeline_import_sync_file(rel->timeline, rel->point, fence);
++	if (fence >= 0) {
++		close(fence);
++	}
++	if (!done && drmSyncobjTimelineSignal(rel->timeline->drm_fd, &rel->timeline->handle,
++			&rel->point, 1) != 0) {
++		wlr_log_errno(WLR_ERROR, "drmSyncobjTimelineSignal() failed");
++	}
++	wl_list_remove(&rel->buffer_release.link);
++	wl_list_remove(&rel->buffer_destroy.link);
++	wlr_drm_syncobj_timeline_unref(rel->timeline);
++	free(rel);
++}
++
++static void syncobj_release_handle_release(struct wl_listener *listener, void *data) {
++	struct syncobj_release *rel = wl_container_of(listener, rel, buffer_release);
++	syncobj_release_fire(rel);
++}
++
++static void syncobj_release_handle_destroy(struct wl_listener *listener, void *data) {
++	struct syncobj_release *rel = wl_container_of(listener, rel, buffer_destroy);
++	syncobj_release_fire(rel);
++}
++
++static bool syncobj_release_watch(struct wlr_buffer *buffer,
++		struct wlr_drm_syncobj_timeline *timeline, uint64_t point) {
++	struct syncobj_release *rel = calloc(1, sizeof(*rel));
++	if (rel == NULL) {
++		return false;
++	}
++	rel->timeline = wlr_drm_syncobj_timeline_ref(timeline);
++	rel->point = point;
++	rel->buffer_release.notify = syncobj_release_handle_release;
++	wl_signal_add(&buffer->events.release, &rel->buffer_release);
++	rel->buffer_destroy.notify = syncobj_release_handle_destroy;
++	wl_signal_add(&buffer->events.destroy, &rel->buffer_destroy);
++	return true;
++}
++
++// DEsk/Red Ronin: tells the compositor this wlroots waits for signalled
++// acquire points and signals release points (it offers the protocol only then)
++bool wlr_linux_drm_syncobj_v1_desk_releases(void);
++bool wlr_linux_drm_syncobj_v1_desk_releases(void) {
++	return true;
++}
++
+ static void surface_handle_client_commit(struct wl_listener *listener,
+ 		void *data) {
+ 	struct wlr_linux_drm_syncobj_surface_v1 *surface =
+@@ -300,6 +377,14 @@
+ 		wl_resource_post_no_memory(surface->resource);
+ 		return;
+ 	}
++
++	if (surface->pending.release_timeline != NULL &&
++			surface->surface->pending.buffer != NULL) {
++		if (!syncobj_release_watch(surface->surface->pending.buffer,
++				surface->pending.release_timeline, surface->pending.release_point)) {
++			wl_resource_post_no_memory(surface->resource);
++		}
++	}
+ }
+ 
+ static void manager_handle_get_surface(struct wl_client *client,

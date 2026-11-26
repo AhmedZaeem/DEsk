@@ -1665,6 +1665,122 @@ static void s_type_return(struct buf *b, struct rng *r, int v)
 	finish(b, -23.0, -8.0);
 }
 
+/* -- the storm (Red Ronin) -- */
+
+/* Rain, made to go round: twelve and a half seconds made, the last half
+ * laid over the first, twelve kept, so the end runs into the start. A bed
+ * of hiss off the roof and the leaves, its gusts slow and whole within the
+ * loop; drops on the eaves, quick and many; and now and then a heavier one
+ * off the gutter into a puddle, its little rising plop. */
+static void s_rain(struct buf *b, struct rng *r, int v)
+{
+	(void)v;
+	const double keep = 12.0, lap = 0.5;
+	int n = at(keep + lap), nk = at(keep), nl = at(lap);
+	float *hiss = coloured(r, n, HP(380.0, 0.6), LP(5200.0, 0.6), NOF);
+	float *low = coloured(r, n, HP(90.0, 0.7), LP(700.0, 0.7), NOF);
+	if (!hiss || !low) {
+		free(hiss);
+		free(low);
+		return;
+	}
+	for (int i = 0; i < n && i < b->n; i++) {
+		double t = i / SR;
+		/* gusts: two slow swells, a whole number of times round the loop */
+		double g = 0.78 + 0.14 * sin(TAU * t * 2.0 / keep + 0.7) + 0.08 * sin(TAU * t * 5.0 / keep);
+		put(b, i, (hiss[i] * 0.55 + low[i] * 0.35) * g);
+	}
+	free(hiss);
+	free(low);
+	/* the drops on the eaves and the stones */
+	int drops = (int)(keep * 140.0);
+	for (int k = 0; k < drops; k++) {
+		double t0 = rnd(r) * (keep + lap);
+		double f = 1800.0 + 4200.0 * rnd(r);
+		int len = at(0.006 + 0.01 * rnd(r));
+		float *d = coloured(r, len, BP(f, 1.6), NOF, NOF);
+		if (!d) {
+			continue;
+		}
+		double amp = 0.05 + 0.18 * rnd(r) * rnd(r);
+		int i0 = at(t0);
+		for (int j = 0; j < len; j++) {
+			put(b, i0 + j, d[j] * amp * exp(-6.0 * j / (double)len));
+		}
+		free(d);
+	}
+	/* off the gutter: a heavier drop, and its plop rising in pitch */
+	for (double t0 = 0.4 + rnd(r) * 0.6; t0 < keep + lap - 0.2; t0 += 0.7 + rnd(r) * 1.6) {
+		double f0 = 520.0 + 380.0 * rnd(r);
+		int i0 = at(t0), len = at(0.05);
+		double ph = 0.0;
+		for (int j = 0; j < len; j++) {
+			double u = j / (double)len;
+			ph += TAU * f0 * (1.0 + 0.9 * u) / SR;
+			put(b, i0 + j, 0.16 * sin(ph) * exp(-5.0 * u) * fmin(j / (0.002 * SR), 1.0));
+		}
+	}
+	/* the seam: the made half-second past the end over the start */
+	for (int i = 0; i < nl && nk + i < b->n; i++) {
+		double u = i / (double)nl;
+		double a = sin(0.5 * PI * u), z = cos(0.5 * PI * u);
+		b->x[i] = (float)(b->x[i] * a + b->x[nk + i] * z);
+	}
+	b->n = nk;
+	/* brought to a level by hand: finish() would trim and fade the ends */
+	double ss = 0.0;
+	for (int i = 0; i < b->n; i++) {
+		ss += (double)b->x[i] * b->x[i];
+	}
+	double rms = sqrt(ss / (b->n > 0 ? b->n : 1));
+	double g = rms > 1e-9 ? pow(10.0, -24.0 / 20.0) / rms : 0.0;
+	for (int i = 0; i < b->n; i++) {
+		b->x[i] *= (float)g;
+	}
+}
+
+/* Thunder: v 0 near (a crack, then the roll), 1 middling, 2 far (only the
+ * roll, low and long). The roll is low noise swelling and falling a few
+ * times as the sound comes back off the hills, each time later and weaker. */
+static void s_thunder(struct buf *b, struct rng *r, int v)
+{
+	double near_ = v == 0 ? 1.0 : v == 1 ? 0.45 : 0.0;
+	int n = b->n;
+	if (near_ > 0.0) {
+		int len = at(0.35);
+		float *c = coloured(r, len, HP(900.0, 0.7), LP(9000.0, 0.7), NOF);
+		if (c) {
+			for (int j = 0; j < len; j++) {
+				double u = j / (double)len;
+				double e = exp(-14.0 * u) + 0.4 * exp(-4.0 * u) * (rnd(r) < 0.02 ? 1.0 : 0.3);
+				put(b, at(0.02) + j, c[j] * 0.9 * near_ * e);
+			}
+			free(c);
+		}
+	}
+	float *roll = coloured(r, n, HP(28.0, 0.7), LP(v == 2 ? 140.0 : 220.0, 0.7), LP(400.0, 0.5));
+	if (!roll) {
+		return;
+	}
+	double start = near_ > 0.0 ? 0.08 : 0.0;
+	double pk[5], wd[5], am[5];
+	for (int k = 0; k < 5; k++) {
+		pk[k] = start + 0.25 + k * (0.55 + 0.35 * rnd(r));
+		wd[k] = 0.35 + 0.5 * rnd(r) + k * 0.15;
+		am[k] = (1.0 - 0.16 * k) * (0.6 + 0.4 * rnd(r));
+	}
+	for (int i = 0; i < n; i++) {
+		double t = i / SR, e = 0.0;
+		for (int k = 0; k < 5; k++) {
+			double d = (t - pk[k]) / wd[k];
+			e += am[k] * exp(-d * d);
+		}
+		put(b, i, roll[i] * 1.6 * e * fmin(t / 0.04, 1.0));
+	}
+	free(roll);
+	finish(b, v == 2 ? -20.0 : -15.0, -1.5);
+}
+
 static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_PAPER_SWING] = { "paper-swing", 0.42, 3, s_paper_swing },
 	[DESK_SND_PAPER_PRESS] = { "paper-press", 0.16, 4, s_paper_press },
@@ -1763,6 +1879,8 @@ static const struct sfx_def SFX[DESK_SND_COUNT] = {
 	[DESK_SND_TYPE_SHIFT] = { "type-shift", 0.18, 2, s_type_shift },
 	[DESK_SND_TYPE_BELL] = { "type-bell", 0.9, 1, s_type_bell },
 	[DESK_SND_TYPE_RETURN] = { "type-return", 0.48, 2, s_type_return },
+	[DESK_SND_RAIN] = { "rain", 12.5, 1, s_rain },
+	[DESK_SND_THUNDER] = { "thunder", 6.0, 3, s_thunder },
 };
 
 const char *desk_sound_name(enum desk_sound s)

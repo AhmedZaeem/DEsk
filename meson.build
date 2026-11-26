@@ -242,6 +242,25 @@ executable('desk-preview',
 wm_sources = proto_headers + ['src/wm.c', 'src/touch.c', 'src/things.c', 'src/thing-phone.c', 'src/thing-notebook.c', 'src/thing-calc.c', 'src/thing-keyboard.c', 'src/thing-mat.c', 'src/thing-clipboard.c', 'src/clips.c', 'src/handwriting.c', 'src/power.c', 'src/session.c', 'src/lock.c', 'src/orient.c',
   'src/camera.c', 'src/occasion.c', 'src/cards.c', 'src/rec.c', 'src/tile.c']
 wm_deps = [wlroots, wayland_server, xkbcommon, cairo, fontconfig, freetype, pixman, libdrm, math, threads]
+if have_gpu
+  # the release fence for explicit sync (wm.c syncobj_release_fence), and
+  # the stacks changing in three dimensions (wstrans.c, its shader as a string)
+  wm_deps += [egl, glesv2]
+  wstrans_glsl_h = custom_target('wstrans_glsl.h',
+    input: 'src/wstrans.glsl',
+    output: 'wstrans_glsl.h',
+    command: [import('python').find_installation(), files('scripts/glsl2c.py'),
+      'WSTRANS_GLSL', '@INPUT@', '@OUTPUT@'],
+  )
+  wm_sources += ['src/wstrans.c', wstrans_glsl_h]
+  storm_glsl_h = custom_target('storm_glsl.h',
+    input: 'src/storm.glsl',
+    output: 'storm_glsl.h',
+    command: [import('python').find_installation(), files('scripts/glsl2c.py'),
+      'STORM_GLSL', '@INPUT@', '@OUTPUT@'],
+  )
+  wm_sources += ['src/storm.c', storm_glsl_h]
+endif
 # the screen lock checks the password as login does
 pam = dependency('pam', required: false)
 if not pam.found()
@@ -448,7 +467,7 @@ install_data(
 # the screen lock's PAM service (it includes "login"); PAM reads only /etc
 install_data('session/pam/desk', install_dir: '/etc/pam.d')
 install_data('scripts/desk-session-helper', 'scripts/desk-screenshot', 'scripts/desk-record',
-  'scripts/desk-ctl',
+  'scripts/desk-ctl', 'scripts/desk-power-menu',
   'scripts/desk-report', 'scripts/desk-screen-chooser',
   install_dir: get_option('bindir'),
   install_mode: 'rwxr-xr-x',

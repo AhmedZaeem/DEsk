@@ -1244,6 +1244,8 @@ struct desk_lock_look {
 	double move_t;
 };
 void desk_draw_lock(cairo_t *cr, int w, int h, const struct desk_lock_look *look);
+/* Red Ronin: the password slot's box at rest, for a login screen made from the door */
+bool desk_lock_slot_box(int w, int h, double box[4]);
 
 /* How the door's moves go, in seconds from when each begins: the walk up
  * to it; Return, leaning in to the key and trying it (DESK_LOCK_TRY of a

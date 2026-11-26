@@ -171,7 +171,26 @@ static bool gpu_try_display(struct desk_gpu *g, EGLDisplay d, bool own)
 		}
 		cfg = EGL_NO_CONFIG_KHR;
 	}
-	g->ctx = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ctx_attr);
+	/* Red Ronin: the room is traced on the GPU the screen is drawn with, and
+	 * nothing waits on it, while every frame of the desk does. Asked for at
+	 * low priority (wlroots asks for high for its own), the driver puts the
+	 * screen's work first instead of behind a window of the trace: after a
+	 * login, a minute of films being made had the desk dropping frames. */
+	EGLint prio_attr[8];
+	int pn = 0;
+	prio_attr[pn++] = EGL_CONTEXT_MAJOR_VERSION;
+	prio_attr[pn++] = 3;
+	prio_attr[pn++] = EGL_CONTEXT_MINOR_VERSION;
+	prio_attr[pn++] = 0;
+	if (has_ext(ext, "EGL_IMG_context_priority")) {
+		prio_attr[pn++] = 0x3100;   /* EGL_CONTEXT_PRIORITY_LEVEL_IMG */
+		prio_attr[pn++] = 0x3103;   /* EGL_CONTEXT_PRIORITY_LOW_IMG */
+	}
+	prio_attr[pn] = EGL_NONE;
+	g->ctx = eglCreateContext(d, cfg, EGL_NO_CONTEXT, prio_attr);
+	if (g->ctx == EGL_NO_CONTEXT && pn > 4) {
+		g->ctx = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ctx_attr);
+	}
 	if (g->ctx == EGL_NO_CONTEXT) {
 		goto fail;
 	}

@@ -725,6 +725,10 @@ static int write_lock(const char *path, int w, int h)
 			(t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) * 1e-6, fine);
 		cairo_destroy(cr);
 		if (only && atoi(only) == i) {
+			double sb[4];
+			if (desk_lock_slot_box(w, h, sb)) {
+				printf("slot %.1f %.1f %.1f %.1f\n", sb[0], sb[1], sb[2], sb[3]);
+			}
 			cairo_surface_write_to_png(f, path);
 			cairo_surface_destroy(f);
 			printf("wrote %s (frame %d)\n", path, i);

@@ -13,6 +13,7 @@ export WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 XDG_SESSION_TYPE=wayland LA
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/desk" "$XDG_CACHE_HOME" /out
 chmod 700 "$XDG_RUNTIME_DIR"
 cat > "$XDG_CONFIG_HOME/desk/shell.conf" <<'EOF'
+focus_follows_mouse = yes
 lights_at_login = no
 weather = no
 tiling = yes
@@ -75,6 +76,22 @@ desk-ctl do focus left >/dev/null 2>&1; desk-ctl do focus left >/dev/null 2>&1
 desk-ctl do focus left > /dev/null 2>&1; rc=$?
 [ $rc -ne 0 ] && pass "nothing left of the master (exit $rc)" || fail "focus left of master succeeded"
 
+# Hyprland's keys: resize moves the split; the master grows with it
+desk-ctl do resize 60 0 >/dev/null; settle 1
+r=$(q | grep -o '"ratio":[0-9.]*' | cut -d: -f2)
+awk "BEGIN{exit !($r > 0.65)}" && pass "resize widened the master (ratio $r)" || fail "resize: ratio $r"
+desk-ctl do ratio 0.65 >/dev/null
+# split: the tiling turned a quarter, the master across the top
+desk-ctl do split >/dev/null; settle
+q | grep -q '"flip":true' && q | grep -q '"tiled":true[^}]*' \
+	&& q | grep -o '"w":[0-9]*,"h":[0-9]*,"tiled":true' | awk -F'[:,]' '$2>1400 && $4<800{f=1} END{exit !f}' \
+	&& pass "split: the master lies across the top" || fail "split: $(q | grep -o '"w":[0-9]*,"h":[0-9]*,"tiled":true' | tr '\n' ' ')"
+shot 04b-split
+desk-ctl do split >/dev/null; settle
+q | grep -q '"flip":false' && pass "split back" || fail "split back"
+desk-ctl do launcher >/dev/null 2>&1 && pass "launcher action runs (the bookcase, without fuzzel)" || fail "launcher"
+settle 2; desk-ctl do shelf >/dev/null 2>&1; settle 2   # and put away again
+
 # swap: the master moved into the stack
 master_before=$(q | grep -o '"title":"[a-z]*"[^}]*"x":[0-9]*' | sort -t: -k4 -n | head -1)
 desk-ctl do move right >/dev/null; settle
@@ -132,6 +149,15 @@ desk-ctl do workspace 11 >/dev/null 2>&1; [ $? -ne 0 ] && pass "workspace 11 ref
 desk-ctl do close >/dev/null; settle 3
 [ "$(count '"tiled":true')" -eq 3 ] && pass "closed one: 3 left tiled" || fail "after close: $(count '"tiled":true')"
 shot 11-after-close
+
+# focus follows the pointer: over a window without the keys, it gets them
+line=$(q | grep -o '{"title":"[a-z]*"[^}]*"focused":false[^}]*}' | head -1)
+t=$(echo "$line" | sed 's/.*"title":"\([a-z]*\)".*/\1/')
+px=$(echo "$line" | sed 's/.*"x":\([0-9-]*\).*/\1/'); py=$(echo "$line" | sed 's/.*"y":\([0-9-]*\).*/\1/')
+pw=$(echo "$line" | sed 's/.*"w":\([0-9]*\).*/\1/'); ph=$(echo "$line" | sed 's/.*"h":\([0-9]*\).*/\1/')
+desk-ctl do pointer $((px + pw / 2)) $((py + ph / 2)) >/dev/null; settle
+q | grep -q "\"title\":\"$t\"[^}]*\"focused\":true" && pass "the keys follow the pointer (to $t)" \
+	|| fail "focus did not follow the pointer to $t"
 
 kill "$desk_pid" 2>/dev/null; wait "$desk_pid" 2>/dev/null
 [ ! -e "$ctl" ] && pass "socket removed at exit" || fail "socket left behind"

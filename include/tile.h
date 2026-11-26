@@ -39,6 +39,11 @@ struct tile_box {
 /* n boxes for n sheets, in order, inside area: gap pixels between them and
  * round the edge; ratio the share of the first split (0.1 .. 0.9). Nothing
  * comes out narrower or shorter than 1 pixel. */
+/* The same, each way it turns made the other (Super+V, tiling_split):
+ * the master on top of a wide screen, columns as rows, dwindle's first
+ * split the other way. */
+void tile_arrange_turned(enum tile_layout layout, struct tile_box area, int n, double ratio,
+	int gap, bool turned, struct tile_box *out);
 void tile_arrange(enum tile_layout layout, struct tile_box area, int n, double ratio, int gap,
 	struct tile_box *out);
 
@@ -97,6 +102,19 @@ enum tile_act {
 	TILE_ACT_CLIPBOARD,
 	TILE_ACT_SWITCHER,       /* Alt+Tab's spread */
 	TILE_ACT_RELOAD,         /* shell.conf read again */
+	TILE_ACT_RESIZE,         /* num, num2: points wider and taller (Hyprland's resizeactive);
+	                          * a tiled sheet moves the split it is on */
+	TILE_ACT_SPLIT,          /* the tiling turned a quarter (master on top, not at the side) */
+	TILE_ACT_LAUNCHER,       /* tile_conf.launcher, or fuzzel, or the bookcase */
+	TILE_ACT_WINDOW,         /* Red Ronin: the shoji window behind the desk, open or shut (storm.c) */
+	TILE_ACT_LIGHTNING,      /* and lightning outside it, now */
+	TILE_ACT_POWER,          /* the power menu (desk-power-menu): nothing happens till one is chosen */
+	TILE_ACT_SUSPEND,        /* the machine to sleep */
+	TILE_ACT_REBOOT,         /* restart, the windows asked to close first */
+	TILE_ACT_POWEROFF,       /* shut down, likewise */
+	TILE_ACT_SCREEN,         /* the keys and pointer to the screen that way */
+	TILE_ACT_TO_SCREEN,      /* the front sheet to the screen that way, into the stack shown there */
+	TILE_ACT_POINTER,        /* the pointer to X Y on the layout, as a mouse would take it (for tests) */
 	TILE_ACT_COUNT,
 };
 
@@ -109,6 +127,7 @@ struct tile_action {
 	int arg;
 	bool abs;                /* num is a value, not a step */
 	double num;
+	double num2;             /* resize: the second number (taller) */
 	enum tile_dir dir;
 	char cmd[TILE_CMD_MAX];
 };
@@ -135,8 +154,16 @@ struct tile_conf {
 	double ratio;
 	double gap_pt;           /* in points, between sheets and round the edge */
 	bool ws_wrap;            /* next from the last goes to the first */
+	bool ws_per_screen;      /* Red Ronin: each screen shows a stack of its own (Hyprland's way) */
+	/* workspace_screen = N TEXT: stack N belongs on the screen whose make,
+	 * model, serial or connector has TEXT in it ("" none) */
+	char ws_screen[TILE_WS_MAX + 1][64];
 	bool binds_default;      /* the Red Ronin set under the binds given (bind_defaults) */
 	bool style_redronin;     /* ui_style = redronin: the seal, the stack on the clock */
+	bool split_flip;         /* tiling_split = flipped: the layouts turned a quarter */
+	char launcher[TILE_CMD_MAX];   /* launcher = CMD: what the launcher action runs */
+	bool super_tap_set;      /* super_tap = ACTION given: Super pressed and let go alone */
+	struct tile_action super_tap;
 	int n_binds;
 	struct tile_bind binds[TILE_BINDS_MAX];
 };

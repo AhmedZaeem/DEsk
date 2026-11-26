@@ -1,0 +1,14 @@
+[SddmGreeterTheme]
+Name=Red Ronin · Dojo
+Description=The dojo's gate on a rainy night: DEsk's own lock screen, the password into its lacquer board.
+Author=Red Ronin
+Copyright=none
+License=MIT
+Type=sddm-theme
+Version=1.0
+Website=
+Screenshot=assets/door.png
+MainScript=Main.qml
+ConfigFile=theme.conf
+TranslationsDirectory=
+QtVersion=6

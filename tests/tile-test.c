@@ -181,9 +181,30 @@ static void binds(void)
 	b = tile_bind_find(&c, TILE_MOD_LOGO, zero, 1);
 	CHECK(b && b->action.act == TILE_ACT_WORKSPACE && b->action.arg == 10, "super+0 is 10");
 	CHECK(c.n_binds < TILE_BINDS_MAX, "room left (%d)", c.n_binds);
+	/* the keys as Hyprland had them */
+	uint32_t dkey[] = { XKB_KEY_d }, vkey[] = { XKB_KEY_v }, mkey[] = { XKB_KEY_minus },
+		akey[] = { XKB_KEY_a };
+	b = tile_bind_find(&c, TILE_MOD_LOGO, dkey, 1);
+	CHECK(b && b->action.act == TILE_ACT_LAUNCHER, "super+d launcher");
+	b = tile_bind_find(&c, TILE_MOD_LOGO, akey, 1);
+	CHECK(b && b->action.act == TILE_ACT_SHELF, "super+a the bookcase");
+	b = tile_bind_find(&c, TILE_MOD_LOGO, vkey, 1);
+	CHECK(b && b->action.act == TILE_ACT_SPLIT, "super+v split");
+	b = tile_bind_find(&c, TILE_MOD_LOGO | TILE_MOD_CTRL, vkey, 1);
+	CHECK(b && b->action.act == TILE_ACT_LAYOUT, "super+ctrl+v layout");
+	b = tile_bind_find(&c, TILE_MOD_LOGO, mkey, 1);
+	CHECK(b && b->action.act == TILE_ACT_RESIZE && b->action.num < 0 && b->action.num2 == 0,
+		"super+minus narrower");
+	b = tile_bind_find(&c, TILE_MOD_LOGO | TILE_MOD_SHIFT, mkey, 1);
+	CHECK(b && b->action.act == TILE_ACT_RESIZE && b->action.num == 0 && b->action.num2 < 0,
+		"super+shift+minus shorter");
+	b = tile_bind_find(&c, TILE_MOD_LOGO | TILE_MOD_CTRL, mkey, 1);
+	CHECK(b && b->action.act == TILE_ACT_RATIO, "super+ctrl+minus ratio");
+	CHECK(c.super_tap_set && c.super_tap.act == TILE_ACT_LAUNCHER, "a tap of super: launcher");
 
 	/* written back as shell.conf has it */
 	char line[400];
+	b = tile_bind_find(&c, TILE_MOD_LOGO, zero, 1);
 	tile_bind_format(b, line, sizeof line);
 	CHECK(strstr(line, "SUPER+") && strstr(line, "workspace 10"), "format: [%s]", line);
 
@@ -197,12 +218,59 @@ static void binds(void)
 	CHECK(!tile_conf_key(&c, "desk_wood", "negoro", err, sizeof err), "not ours");
 }
 
+static void test_turned(void)
+{
+	struct tile_box out[3], area = { 0, 0, 1600, 1000 };
+	tile_arrange_turned(TILE_LAYOUT_MASTER, area, 3, 0.6, 0, true, out);
+	CHECK(out[0].w == 1600 && out[0].h == 600 && out[1].y == 600 && out[2].y == 600,
+		"turned master on top: %d,%d %dx%d", out[0].x, out[0].y, out[0].w, out[0].h);
+	tile_arrange_turned(TILE_LAYOUT_COLUMNS, area, 2, 0.5, 0, true, out);
+	CHECK(out[0].w == 1600 && out[1].y >= 500, "turned columns are rows");
+	tile_arrange_turned(TILE_LAYOUT_MASTER, area, 3, 0.6, 0, false, out);
+	CHECK(out[0].h == 1000 && out[0].w == 960, "unturned master at the side");
+}
+
+static void test_hypr_actions(void)
+{
+	struct tile_action a;
+	char err[160];
+	CHECK(tile_action_parse("resize 80 0", &a, err, sizeof err) && a.act == TILE_ACT_RESIZE
+		&& a.num == 80 && a.num2 == 0, "resize 80 0: %s", err);
+	CHECK(tile_action_parse("resizeactive -40,20", &a, err, sizeof err) && a.num == -40
+		&& a.num2 == 20, "resizeactive -40,20: %s", err);
+	CHECK(!tile_action_parse("resize", &a, err, sizeof err), "resize needs numbers");
+	CHECK(!tile_action_parse("resize 0 0", &a, err, sizeof err), "resize 0 0 is nothing");
+	CHECK(!tile_action_parse("resize 10 x", &a, err, sizeof err), "resize 10 x refused");
+	CHECK(!tile_action_parse("resize 1e9 0", &a, err, sizeof err), "resize too far refused");
+	CHECK(tile_action_parse("togglesplit", &a, err, sizeof err) && a.act == TILE_ACT_SPLIT,
+		"togglesplit is split");
+	CHECK(tile_action_parse("launcher", &a, err, sizeof err) && a.act == TILE_ACT_LAUNCHER,
+		"launcher");
+	struct tile_conf c;
+	tile_conf_defaults(&c);
+	CHECK(!c.super_tap_set && !c.launcher[0] && !c.split_flip, "defaults: none of it");
+	err[0] = '\0';
+	CHECK(tile_conf_key(&c, "launcher", "fuzzel --config x", err, sizeof err) && !err[0]
+		&& !strcmp(c.launcher, "fuzzel --config x"), "launcher key");
+	CHECK(tile_conf_key(&c, "super_tap", "none", err, sizeof err) && !err[0]
+		&& c.super_tap_set && c.super_tap.act == TILE_ACT_NONE, "super_tap none");
+	tile_conf_key(&c, "super_tap", "teleport", err, sizeof err);
+	CHECK(err[0], "super_tap teleport complains");
+	err[0] = '\0';
+	CHECK(tile_conf_key(&c, "tiling_split", "flipped", err, sizeof err) && !err[0] && c.split_flip,
+		"tiling_split flipped");
+	tile_binds_redronin(&c);
+	CHECK(c.super_tap.act == TILE_ACT_NONE, "the file's super_tap kept");
+}
+
 int main(void)
 {
 	layouts();
 	ways();
 	actions();
 	binds();
+	test_hypr_actions();
+	test_turned();
 	if (g_failed) {
 		fprintf(stderr, "tile-test: %d failed\n", g_failed);
 		return 1;

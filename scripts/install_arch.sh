@@ -509,6 +509,13 @@ if [ "$wlroots" = source ]; then
 		printf '%s|%s|%s|%s|%s\n' "$what" "$ver" "$url" "$sum" "$opts" >> "$tmp/sources"
 	done < "$tmp/table"
 	todo=$(cut -d'|' -f1,2 "$tmp/sources" | tr '|' ' ')
+	# Red Ronin's patches to wlroots (explicit sync): a different patch is a
+	# different build, so one built without it is not kept
+	wlrpatch="$root/packaging/redronin/wlroots-0.18.3-explicit-sync.patch"
+	if [ -f "$wlrpatch" ]; then
+		todo="$todo
+patch $(sha256sum "$wlrpatch" | cut -c1-16)"
+	fi
 	if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$todo" ] \
 		&& PKG_CONFIG_PATH=$pcpath pkg-config --exact-version="$wlrver" wlroots-0.18 2>/dev/null; then
 		say "  $(printf '%s' "$todo" | tr '\n' ',' | sed 's/,/, /g'): built before, kept"
@@ -522,6 +529,10 @@ if [ "$wlroots" = source ]; then
 			src="$deps/$what-$ver"
 			as_builder rm -rf "$src"
 			as_builder tar -xf "$deps/${url##*/}" -C "$deps"
+			if [ "$what" = wlroots ] && [ -f "$wlrpatch" ]; then
+				say "  wlroots: Red Ronin's explicit-sync patch"
+				as_builder patch -d "$src" -p1 < "$wlrpatch" || die "the wlroots patch does not apply"
+			fi
 			say "  building $what $ver"
 			# the run path, for what has libraries (the protocols are only XML)
 			[ "$what" = wayland-protocols ] || opts="$opts -Dc_link_args=-Wl,-rpath,$wlr/lib"

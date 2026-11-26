@@ -127,6 +127,9 @@ enum desk_sound {
 	DESK_SND_TYPE_SHIFT,       /* the whole basket lifting */
 	DESK_SND_TYPE_BELL,        /* the margin's bell */
 	DESK_SND_TYPE_RETURN,      /* the lever, the platen's ratchet, the carriage going home */
+	/* Red Ronin: the storm (storm.c) */
+	DESK_SND_RAIN,             /* rain on the roof and the garden, a loop with no seam (desk_sound_loop) */
+	DESK_SND_THUNDER,          /* a strike, near or far: the crack, the roll coming back off the hills */
 	DESK_SND_COUNT
 };
 

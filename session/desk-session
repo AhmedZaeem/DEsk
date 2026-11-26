@@ -76,6 +76,25 @@ export ELECTRON_OZONE_PLATFORM_HINT=wayland
 # starts what the autostart directories ask for (session.c)
 export DESK_SESSION=1
 
+# Red Ronin: settings for the desk itself that are not shell.conf's, one
+# NAME=value a line (DESK_PROFILE_FRAMES=..., DESK_GRAPHICS=...), read
+# before it starts; comments and blank lines are fine.
+desk_env="${XDG_CONFIG_HOME:-$HOME/.config}/desk/environment"
+if [ -r "$desk_env" ]; then
+	# a typo in it must not keep anybody from logging in: tried in a shell
+	# of its own first, and read without -e and -u
+	if (set +eu; . "$desk_env") >/dev/null 2>&1; then
+		set +eu
+		set -a
+		# shellcheck disable=SC1090
+		. "$desk_env"
+		set +a
+		set -eu
+	else
+		echo "desk-session: $desk_env has a mistake in it; not read" >&2
+	fi
+fi
+
 # Qt's programs. DEsk's standard set is GTK's classic programs, so a Qt
 # program is dressed as they are -- GTK's colours, icons, fonts and file
 # dialog -- by Qt's own GTK platform theme: what Qt picks by itself under

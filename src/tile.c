@@ -95,6 +95,12 @@ static void even(struct tile_box b, bool across, int n, int gap, struct tile_box
 void tile_arrange(enum tile_layout layout, struct tile_box area, int n, double ratio, int gap,
 	struct tile_box *out)
 {
+	tile_arrange_turned(layout, area, n, ratio, gap, false, out);
+}
+
+void tile_arrange_turned(enum tile_layout layout, struct tile_box area, int n, double ratio,
+	int gap, bool turned, struct tile_box *out)
+{
 	if (n <= 0) {
 		return;
 	}
@@ -119,7 +125,7 @@ void tile_arrange(enum tile_layout layout, struct tile_box area, int n, double r
 	}
 	switch (layout) {
 	case TILE_LAYOUT_COLUMNS:
-		even(b, true, n, gap, out);
+		even(b, !turned, n, gap, out);   /* (turned: rows) */
 		return;
 	case TILE_LAYOUT_DWINDLE:
 		for (int i = 0; i < n; i++) {
@@ -129,7 +135,7 @@ void tile_arrange(enum tile_layout layout, struct tile_box area, int n, double r
 			}
 			/* across while the piece left is wider than tall, as Hyprland's
 			 * dwindle turns, so that a wide screen's pieces stay readable */
-			bool across = b.w >= b.h;
+			bool across = (b.w >= b.h) != turned;
 			struct tile_box first, rest;
 			split(b, across, i == 0 ? ratio : 0.5, gap, &first, &rest);
 			out[i] = first;
@@ -139,10 +145,12 @@ void tile_arrange(enum tile_layout layout, struct tile_box area, int n, double r
 	case TILE_LAYOUT_MASTER:
 	default: {
 		struct tile_box master, stack;
-		/* on a screen taller than wide (turned), the master is on top */
-		split(b, b.w >= b.h, ratio, gap, &master, &stack);
+		/* on a screen taller than wide, the master is on top; turned, the
+		 * other way about */
+		bool across = (b.w >= b.h) != turned;
+		split(b, across, ratio, gap, &master, &stack);
 		out[0] = master;
-		even(stack, !(b.w >= b.h), n - 1, gap, out + 1);
+		even(stack, !across, n - 1, gap, out + 1);
 		return;
 	}
 	}
@@ -283,6 +291,18 @@ static const char *const ACT_NAMES[TILE_ACT_COUNT] = {
 	[TILE_ACT_CLIPBOARD] = "clipboard",
 	[TILE_ACT_SWITCHER] = "switcher",
 	[TILE_ACT_RELOAD] = "reload",
+	[TILE_ACT_RESIZE] = "resize",
+	[TILE_ACT_SPLIT] = "split",
+	[TILE_ACT_LAUNCHER] = "launcher",
+	[TILE_ACT_WINDOW] = "window",
+	[TILE_ACT_LIGHTNING] = "lightning",
+	[TILE_ACT_POWER] = "power",
+	[TILE_ACT_SUSPEND] = "suspend",
+	[TILE_ACT_REBOOT] = "reboot",
+	[TILE_ACT_POWEROFF] = "poweroff",
+	[TILE_ACT_SCREEN] = "focusscreen",
+	[TILE_ACT_TO_SCREEN] = "movetoscreen",
+	[TILE_ACT_POINTER] = "pointer",
 };
 
 const char *tile_act_name(enum tile_act a)
@@ -393,13 +413,14 @@ bool tile_action_parse(const char *s, struct tile_action *out, char *err, size_t
 		static const struct { const char *name; enum tile_act a; } ALIAS[] = {
 			{ "killactive", TILE_ACT_CLOSE }, { "togglefloating", TILE_ACT_FLOAT },
 			{ "movefocus", TILE_ACT_FOCUS }, { "movewindow", TILE_ACT_MOVE },
+			{ "focusmonitor", TILE_ACT_SCREEN }, { "movewindowmonitor", TILE_ACT_TO_SCREEN },
 			{ "swapwindow", TILE_ACT_MOVE }, { "swap", TILE_ACT_MOVE },
 			{ "minimize", TILE_ACT_FOLD }, { "centerwindow", TILE_ACT_CENTER },
 			{ "maximise", TILE_ACT_MAXIMIZE }, { "unfold", TILE_ACT_MAXIMIZE },
 			{ "exit", TILE_ACT_LOGOUT }, { "screenshot", TILE_ACT_SNIP },
-			{ "launcher", TILE_ACT_SHELF }, { "apps", TILE_ACT_SHELF },
+			{ "apps", TILE_ACT_SHELF }, { "resizeactive", TILE_ACT_RESIZE },
 			{ "notifications", TILE_ACT_POST }, { "controlpanel", TILE_ACT_CONSOLE },
-			{ "dock", TILE_ACT_DRAWER }, { "togglesplit", TILE_ACT_LAYOUT },
+			{ "dock", TILE_ACT_DRAWER }, { "togglesplit", TILE_ACT_SPLIT },
 			{ "layoutmsg", TILE_ACT_LAYOUT }, { "splitratio", TILE_ACT_RATIO },
 			{ "cyclenext", TILE_ACT_CYCLE }, { "swapmaster", TILE_ACT_PROMOTE },
 		};
@@ -462,8 +483,43 @@ bool tile_action_parse(const char *s, struct tile_action *out, char *err, size_t
 			return false;
 		}
 		return true;
+	case TILE_ACT_POINTER: {
+		/* "pointer 400 300": where on the layout */
+		char *e1 = NULL, *e2 = NULL;
+		double px = strtod(arg, &e1);
+		while (e1 && (*e1 == ' ' || *e1 == ',')) {
+			e1++;
+		}
+		double py = e1 && *e1 ? strtod(e1, &e2) : NAN;
+		if (e1 == arg || !e2 || *e2 || !isfinite(px) || !isfinite(py)) {
+			say(err, errn, "pointer takes where on the layout, such as 400 300, not \"%s\"", arg);
+			return false;
+		}
+		out->num = px;
+		out->num2 = py;
+		return true;
+	}
+	case TILE_ACT_RESIZE: {
+		/* "resize 80 0", "resize -80 0", Hyprland's "80 0" or "80,0" */
+		char *e1 = NULL, *e2 = NULL;
+		double dx = strtod(arg, &e1);
+		while (e1 && (*e1 == ' ' || *e1 == ',' || *e1 == '\t')) {
+			e1++;
+		}
+		double dy = e1 && *e1 ? strtod(e1, &e2) : 0.0;
+		if (e1 == arg || (e2 && *e2) || !isfinite(dx) || !isfinite(dy)
+			|| fabs(dx) > 4000.0 || fabs(dy) > 4000.0 || (dx == 0.0 && dy == 0.0)) {
+			say(err, errn, "resize takes points wider and taller, such as 80 0, not \"%s\"", arg);
+			return false;
+		}
+		out->num = dx;
+		out->num2 = dy;
+		return true;
+	}
 	case TILE_ACT_FOCUS:
 	case TILE_ACT_MOVE:
+	case TILE_ACT_SCREEN:
+	case TILE_ACT_TO_SCREEN:
 		if (!tile_dir_parse(arg, &out->dir)) {
 			say(err, errn, "a way: left, right, up or down, not \"%s\"", arg);
 			return false;
@@ -560,6 +616,8 @@ void tile_conf_defaults(struct tile_conf *c)
 	c->ratio = 0.55;
 	c->gap_pt = 6.0;
 	c->ws_wrap = true;
+	c->ws_per_screen = true;
+	memset(c->ws_screen, 0, sizeof c->ws_screen);
 }
 
 static bool yes_no(const char *v, bool *out)
@@ -624,6 +682,36 @@ bool tile_conf_key(struct tile_conf *c, const char *key, const char *val, char *
 		}
 		return true;
 	}
+	if (!strcmp(key, "tiling_split")) {
+		if (!strcasecmp(val, "flipped") || !strcasecmp(val, "yes")) {
+			c->split_flip = true;
+		} else if (!strcasecmp(val, "normal") || !strcasecmp(val, "no")) {
+			c->split_flip = false;
+		} else {
+			say(err, errn, "tiling_split is normal or flipped, not \"%s\"", val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "launcher")) {
+		if (strlen(val) >= sizeof c->launcher) {
+			say(err, errn, "the launcher command is longer than %zu characters",
+				sizeof c->launcher - 1);
+		} else {
+			snprintf(c->launcher, sizeof c->launcher, "%s", val);
+		}
+		return true;
+	}
+	if (!strcmp(key, "super_tap")) {
+		struct tile_action a;
+		char why[160];
+		if (tile_action_parse(val, &a, why, sizeof why)) {
+			c->super_tap = a;
+			c->super_tap_set = true;
+		} else {
+			say(err, errn, "super_tap: %s", why);
+		}
+		return true;
+	}
 	if (!strcmp(key, "tiling_layout")) {
 		if (!tile_layout_parse(val, &c->layout)) {
 			say(err, errn, "tiling_layout is master, dwindle, columns or monocle, not \"%s\"", val);
@@ -647,6 +735,28 @@ bool tile_conf_key(struct tile_conf *c, const char *key, const char *val, char *
 			say(err, errn, "tiling_gap is points from 0 to 64, not \"%s\"", val);
 		} else {
 			c->gap_pt = g;
+		}
+		return true;
+	}
+	if (!strcmp(key, "workspaces_per_screen")) {
+		if (!yes_no(val, &b)) {
+			say(err, errn, "workspaces_per_screen is yes or no, not \"%s\"", val);
+		} else {
+			c->ws_per_screen = b;
+		}
+		return true;
+	}
+	if (!strcmp(key, "workspace_screen")) {
+		/* N, then what names the screen */
+		char *end;
+		long n = strtol(val, &end, 10);
+		while (*end == ' ' || *end == '\t') {
+			end++;
+		}
+		if (end == val || n < 1 || n > TILE_WS_MAX || !*end || strlen(end) >= sizeof c->ws_screen[0]) {
+			say(err, errn, "workspace_screen is a stack and a screen (1 DELL P2720DC), not \"%s\"", val);
+		} else {
+			snprintf(c->ws_screen[n], sizeof c->ws_screen[n], "%s", end);
 		}
 		return true;
 	}
@@ -757,7 +867,9 @@ void tile_bind_format(const struct tile_bind *b, char *out, size_t n)
 		snprintf(act, sizeof act, "exec %s", a->cmd);
 		break;
 	case TILE_ACT_FOCUS:
-	case TILE_ACT_MOVE: {
+	case TILE_ACT_MOVE:
+	case TILE_ACT_SCREEN:
+	case TILE_ACT_TO_SCREEN: {
 		static const char *const W[] = { "left", "right", "up", "down" };
 		snprintf(act, sizeof act, "%s %s", tile_act_name(a->act), W[a->dir]);
 		break;
@@ -825,13 +937,15 @@ void tile_binds_redronin(struct tile_conf *c)
 		{ "SUPER+Return", "terminal" },
 		{ "SUPER+E", "files" },
 		{ "SUPER+B", "browser" },
-		{ "SUPER+D", "shelf" },
+		{ "SUPER+D", "launcher" },
+		{ "SUPER+A", "shelf" },
 		{ "SUPER+SHIFT+D", "drawer" },
 		{ "SUPER+Q", "close" },
 		{ "SUPER+F", "fullscreen" },
 		{ "SUPER+SHIFT+F", "maximize" },
 		{ "SUPER+SHIFT+V", "float" },
-		{ "SUPER+V", "layout next" },
+		{ "SUPER+V", "split" },
+		{ "SUPER+CTRL+V", "layout next" },
 		{ "SUPER+ALT+V", "clipboard" },
 		{ "SUPER+ALT+C", "center" },
 		{ "SUPER+P", "pin" },
@@ -858,10 +972,14 @@ void tile_binds_redronin(struct tile_conf *c)
 		{ "SUPER+ALT+K", "move up" },
 		{ "SUPER+ALT+L", "move right" },
 		{ "SUPER+SHIFT+Return", "promote" },
-		{ "SUPER+minus", "ratio -0.05" },
-		{ "SUPER+equal", "ratio +0.05" },
-		{ "SUPER+SHIFT+minus", "gap -2" },
-		{ "SUPER+SHIFT+equal", "gap +2" },
+		{ "SUPER+minus", "resize -60 0" },
+		{ "SUPER+equal", "resize 60 0" },
+		{ "SUPER+SHIFT+minus", "resize 0 -60" },
+		{ "SUPER+SHIFT+equal", "resize 0 60" },
+		{ "SUPER+CTRL+minus", "ratio -0.05" },
+		{ "SUPER+CTRL+equal", "ratio +0.05" },
+		{ "SUPER+CTRL+SHIFT+minus", "gap -2" },
+		{ "SUPER+CTRL+SHIFT+equal", "gap +2" },
 		{ "SUPER+Tab", "cycle next" },
 		{ "SUPER+SHIFT+Tab", "cycle prev" },
 		{ "SUPER+grave", "workspace previous" },
@@ -870,12 +988,27 @@ void tile_binds_redronin(struct tile_conf *c)
 		{ "SUPER+CTRL+L", "workspace next" },
 		{ "SUPER+CTRL+H", "workspace prev" },
 		{ "SUPER+CTRL+Escape", "lock" },
-		{ "SUPER+Escape", "logout" },
+		{ "SUPER+Escape", "power" },   /* a menu, not out at once */
+		{ "SUPER+SHIFT+Escape", "logout" },
 		{ "SUPER+N", "post" },
 		{ "SUPER+C", "console" },
 		{ "SUPER+SHIFT+S", "snip" },
+		/* the screens: to the one that way, or the front sheet sent there */
+		{ "SUPER+ALT+Left", "focusscreen left" },
+		{ "SUPER+ALT+Right", "focusscreen right" },
+		{ "SUPER+ALT+Up", "focusscreen up" },
+		{ "SUPER+ALT+Down", "focusscreen down" },
+		{ "SUPER+CTRL+SHIFT+Left", "movetoscreen left" },
+		{ "SUPER+CTRL+SHIFT+Right", "movetoscreen right" },
+		{ "SUPER+CTRL+SHIFT+Up", "movetoscreen up" },
+		{ "SUPER+CTRL+SHIFT+Down", "movetoscreen down" },
 		{ "SUPER+SHIFT+R", "reload" },
 	};
+	/* Super pressed and let go on its own: the launcher, unless said otherwise */
+	if (!c->super_tap_set) {
+		tile_action_parse("launcher", &c->super_tap, NULL, 0);
+		c->super_tap_set = true;
+	}
 	struct tile_conf have = *c;
 	for (size_t i = 0; i < sizeof SET / sizeof SET[0]; i++) {
 		uint32_t mods, sym;

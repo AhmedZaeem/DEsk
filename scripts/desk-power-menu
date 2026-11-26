@@ -1,0 +1,34 @@
+#!/bin/sh
+# desk-power-menu -- what Super+Escape opens (Red Ronin): a short list to
+# choose from, nothing done until one is chosen. Lock, log out, sleep,
+# restart, shut down; Esc or a click away is "never mind". Restart and shut
+# down go through DEsk's own way out (the windows asked to close first).
+#
+# fuzzel with the desk's own look if it is there, else wofi or bemenu; with
+# none of them, the Control Panel (its power keys) is opened instead.
+set -u
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/desk/fuzzel.ini"
+items='  Lock      錠
+  Log out   退
+  Sleep     寝
+  Restart   再
+  Shut down 終'
+if command -v fuzzel >/dev/null 2>&1; then
+	set -- fuzzel --dmenu --prompt "  " --lines 5 --width 22
+	[ -r "$cfg" ] && set -- "$@" --config "$cfg"
+elif command -v wofi >/dev/null 2>&1; then
+	set -- wofi --dmenu --prompt power
+elif command -v bemenu >/dev/null 2>&1; then
+	set -- bemenu -p power
+else
+	exec desk-ctl do controlpanel
+fi
+choice=$(printf '%s\n' "$items" | "$@") || exit 0
+case "$choice" in
+*Lock*) exec desk-ctl do lock ;;
+*"Log out"*) exec desk-ctl do logout ;;
+*Sleep*) exec desk-ctl do suspend ;;
+*Restart*) exec desk-ctl do reboot ;;
+*"Shut down"*) exec desk-ctl do poweroff ;;
+esac
+exit 0

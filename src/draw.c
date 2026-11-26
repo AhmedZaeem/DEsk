@@ -5819,12 +5819,14 @@ static bool room_gpu_window(struct desk_gpu *g, int x0, int y0, int w, int h, fl
  * grow only while each one is quick, and shrink again if one is not.
  *
  * Quick is a tenth of a second while the screen waits on the trace, and a
- * sixtieth when it does not (g_room_gentle): the GPU is very likely the
+ * few milliseconds when it does not (g_room_gentle): the GPU is very likely the
  * one the screen is drawn with, and a frame of the desk waits behind
  * whatever draw is on it. */
 static bool room_gpu_tiles(struct desk_gpu *g, struct room_ctx *ctx, long *counted)
 {
-	const double quick = g_room_gentle ? 0.006 : 0.025, slow = g_room_gentle ? 0.016 : 0.100;
+	/* gentle (the desk is up and in use): a window kept to a few ms, and a
+	 * breath after each, so a frame of the desk never waits a whole one */
+	const double quick = g_room_gentle ? 0.003 : 0.025, slow = g_room_gentle ? 0.007 : 0.100;
 	int hw = ctx->hw, hh = ctx->hh;
 	int lim = desk_gpu_max_size(g);
 	int tw = lim < 512 ? lim : 512;
@@ -5846,6 +5848,10 @@ static bool room_gpu_tiles(struct desk_gpu *g, struct room_ctx *ctx, long *count
 				return false;
 			}
 			tiles++;
+			if (g_room_gentle) {
+				struct timespec rest = { 0, 4000000 };   /* 4 ms for the screen */
+				nanosleep(&rest, NULL);
+			}
 			for (int r = 0; r < bh; r++) {
 				const float *s = tile + (size_t)r * bw * 4;
 				float *d = ctx->hi + ((size_t)(y0 + r) * hw + x0) * 4;
@@ -34019,14 +34025,18 @@ static void clk_page_time(cairo_t *cr, const struct tm *tmv, double lit)
 		vx += 38.0;
 	}
 	if (g_clk.have_volume) {
-		/* the blocks take what is left before the number */
-		double bw = fmax(x + CLK_WW - 8.0 - 46.0 - (vx + 24.0), 30.0);
+		/* the blocks take what is left before the number -- or all of it
+		 * with the keyboard's mark in the row too (the blocks say how loud) */
+		bool room = !g_clk.ime[0];
+		double bw = fmax(x + CLK_WW - 8.0 - (room ? 46.0 : 0.0) - (vx + 24.0), 30.0);
 		clk_speaker(cr, vx, cy - 9.0, 18.0, g_clk.muted, lit);
 		clk_blocks(cr, vx + 24.0, cy - 9.0, bw, 18.0, 10, g_clk.muted ? 0.0 : g_clk.volume,
 			lit, true);
-		char v[8];
-		snprintf(v, sizeof v, "%d", (int)lround(g_clk.volume * 100.0));
-		dots_text(cr, g_clk.muted ? "MUTE" : v, x + CLK_WW - 8.0, cy - 5.6, 1.6, 1, lit);
+		if (room) {
+			char v[8];
+			snprintf(v, sizeof v, "%d", (int)lround(g_clk.volume * 100.0));
+			dots_text(cr, g_clk.muted ? "MUTE" : v, x + CLK_WW - 8.0, cy - 5.6, 1.6, 1, lit);
+		}
 	}
 	if (!second) {
 		return;
@@ -43720,12 +43730,19 @@ void desk_draw_forget_words(void)
 #define LK_KNOB_Y 0.985
 
 #define LK_ROOM_Z (-2.70)   /* the far wall inside, the picture of the room on it */
+/* Red Ronin: the noren, hung from a bamboo rod across the top of the
+ * doorway, in front of it: three panels of indigo cotton, slit between */
+#define LK_NOREN_Z 0.064
+#define LK_NOREN_X (LK_OW + 0.05)
+#define LK_NOREN_Y0 1.835
+#define LK_NOREN_Y1 2.235
 #define LK_EXPOSURE 1.15
 
 enum {
 	LK_NONE = 0, LK_WALL_ID, LK_CASING, LK_JAMB, LK_STEP, LK_INSIDE, LK_PICTURE, LK_ROOMIN,
 	LK_DOOR, LK_DOOR_EDGE, LK_SIGN, LK_SIGN_EDGE, LK_PLATE, LK_BRASS, LK_KEY,
 	LK_LGLASS, LK_IRON, LK_DECO,
+	LK_NOREN,   /* Red Ronin: the curtain over the doorway */
 };
 
 /* what on the door throws a shadow, softly */
@@ -43842,6 +43859,7 @@ struct lk_scene {
 	double key;                /* how far the key is turned, radians */
 	double lamp;               /* how lit the room behind the glass is */
 	double open;               /* the doorway: how much of the room's light is out */
+	double slide;              /* Red Ronin: how far the door has slid into the wall, metres */
 	double room_hx, room_y0, room_y1;      /* the room inside */
 	double pic_x0, pic_y0, pic_w, pic_h;   /* the picture of it on its far wall */
 	struct lk_tex sign, gold, plate, pic;
@@ -44022,9 +44040,12 @@ static double lk_smin(double a, double b, double k)
 
 /* ---- where things are ---- */
 
+/* Red Ronin: the door is a sliding one (hikido) and goes into the wall at
+ * the left as it opens, rather than swinging in on hinges; cd and sd stay
+ * as they are for the swing that is no longer made (1 and 0). */
 static vec3 lk_to_door(const struct lk_scene *sc, vec3 p)
 {
-	vec3 q = v3(p.x - LK_HX, p.y, p.z - LK_HZ);
+	vec3 q = v3(p.x - LK_HX + sc->slide, p.y, p.z - LK_HZ);
 	return v3(q.x * sc->cd - q.z * sc->sd, q.y, q.x * sc->sd + q.z * sc->cd);
 }
 
@@ -44041,7 +44062,7 @@ static vec3 lk_door_dir_out(const struct lk_scene *sc, vec3 d)
 static vec3 lk_from_door(const struct lk_scene *sc, vec3 q)
 {
 	vec3 p = lk_door_dir_out(sc, q);
-	return v3(p.x + LK_HX, p.y, p.z + LK_HZ);
+	return v3(p.x + LK_HX - sc->slide, p.y, p.z + LK_HZ);
 }
 
 /* the board's own frame: across it, up it, out of it */
@@ -45363,6 +45384,10 @@ static void lk_door_hit(const struct lk_scene *sc, vec3 ro, vec3 rd, struct lk_h
 	vec3 o = lk_to_door(sc, ro), d = lk_door_dir_in(sc, rd);
 	double t;
 	int f;
+	/* Red Ronin: slid into the wall, what stands out from the door (the key,
+	 * the pull, what it is dressed in) is in the wall too: none of it is
+	 * seen past the doorway's edge */
+	struct lk_hit before = *h;
 	if (lk_box(o, d, v3(0, LK_DY, 0), v3(LK_DW, LK_DY + LK_DH, LK_DT), h->t, &t, &f)) {
 		h->t = t;
 		h->face = f;
@@ -45392,6 +45417,9 @@ static void lk_door_hit(const struct lk_scene *sc, vec3 ro, vec3 rd, struct lk_h
 	lk_march(sc, LK_OC_NAIL, o, d, h);
 	if (sc->ndeco) {
 		lkd_hit(sc, true, o, d, h);
+	}
+	if (sc->slide > 0.0 && h->t < before.t && vadd(ro, vmul(rd, h->t)).x < -LK_OW) {
+		*h = before;
 	}
 }
 
@@ -45557,6 +45585,21 @@ static void lk_intersect(const struct lk_scene *sc, vec3 ro, vec3 rd, struct lk_
 			h->id = c[i].sub == 3 ? LK_PICTURE : LK_INSIDE;
 			h->sub = c[i].sub;
 			h->n = c[i].n;
+			h->q = p;
+		}
+	}
+	/* the noren, a plane in front of the doorway, open at its two slits */
+	if (rd.z < 0.0 && ro.z > LK_NOREN_Z && !sc->ndeco) {
+		t = (LK_NOREN_Z - ro.z) / rd.z;
+		vec3 p = vadd(ro, vmul(rd, t));
+		double third = 2.0 * LK_NOREN_X / 3.0;
+		double slit = fmin(fabs(p.x + LK_NOREN_X - third), fabs(p.x + LK_NOREN_X - 2.0 * third));
+		double hem = LK_NOREN_Y0 + 0.004 * sin(p.x * 37.0);
+		if (t < h->t && fabs(p.x) < LK_NOREN_X && p.y > hem && p.y < LK_NOREN_Y1
+			&& (slit > 0.006 || p.y > LK_NOREN_Y1 - 0.06)) {
+			h->t = t;
+			h->id = LK_NOREN;
+			h->n = v3(0, 0, 1);
 			h->q = p;
 		}
 	}
@@ -45858,7 +45901,9 @@ static vec3 lk_shade(const struct lk_scene *sc, vec3 p, vec3 v, const struct lk_
 			if (p.z > -LK_WALL) {
 				double s0 = (0.0 - p.z) / fmin(l.z, -1e-6);
 				vec3 c = vadd(p, vmul(l, fmax(s0, 0.0)));
-				sh = smoothstepf(-0.02, 0.02, fmin(LK_OW - fabs(c.x), LK_OH - c.y));
+				/* and not through the door, where it still is */
+				double past = c.x - (LK_HX + LK_DW - sc->slide);
+				sh = smoothstepf(-0.02, 0.02, fmin(fmin(LK_OW - fabs(c.x), LK_OH - c.y), past));
 			}
 			vec3 E = vmul(v3(0.95, 0.70, 0.42), 0.55 * sc->open * sh * nol / fmax(d2, 0.15));
 			col = vadd(col, vmul3(vmul(diff, 1.0 / M_PI), E));
@@ -45994,12 +46039,17 @@ static double lk_relief(double x, double y, int *what, int *edge, double *dist)
 			double s = (d - 0.008) / 0.008;
 			return -0.016 + 0.016 * sqrt(fmax(0.0, 1.0 - s * s));
 		}
-		double dv = fabs(x - LK_DW * 0.5), dh = fabs(y - LK_MUNTIN);
+		/* Red Ronin: shoji, not glass: kumiko, four across and four up, on
+		 * paper the lamp inside shows through */
+		const double gx0 = LK_STILE, gw = LK_DW - 2.0 * LK_STILE;
+		const double gy0 = LK_GLASS0, gh = LK_GLASS1 - LK_GLASS0;
+		double fx = (x - gx0) / (gw / 4.0), fy = (y - gy0) / (gh / 4.0);
+		double dv = fabs(fx - floor(fx + 0.5)) * gw / 4.0, dh = fabs(fy - floor(fy + 0.5)) * gh / 4.0;
 		double dm = fmin(dv, dh);
-		if (dm < 0.013) {
+		if (dm < 0.0065) {
 			*what = LK_DF_MUNTIN;
 			*edge = dv < dh ? 0 : 2;
-			return -0.016 + 0.015 * sqrt(fmax(0.0, 1.0 - lk_sq(dm / 0.013)));
+			return -0.004 * (1.0 - sqrt(fmax(0.0, 1.0 - lk_sq(dm / 0.0065))));
 		}
 		*what = LK_DF_GLASS;
 		*dist = fmin(d, dm);
@@ -46019,16 +46069,9 @@ static double lk_relief(double x, double y, int *what, int *edge, double *dist)
 			return -0.010 + sqrt(fmax(0.0, 0.0001 - d * d));
 		}
 		*what = LK_DF_PANEL;
-		if (d < 0.016) {
-			return -0.010;
-		}
-		if (d < 0.060) {
-			return -0.010 + 0.007 * (d - 0.016) / 0.044;
-		}
-		if (d < 0.064) {
-			return -0.003 + 0.003 * smoothstepf(0.060, 0.064, d);
-		}
-		return 0.0;
+		/* Red Ronin: boards on end, a groove between each, set back flat */
+		double gb = fabs(fmod(x - x0 + 1.0, 0.07) - 0.035);
+		return gb > 0.033 ? -0.0075 : -0.005;
 	}
 	return 0.0;
 }
@@ -46077,8 +46120,10 @@ static void lk_door_face(const struct lk_scene *sc, vec3 q, struct lk_mat *m)
 	double rough;
 	m->albedo = along_y ? lk_wood(x + piece * 0.37, y, piece, &rough)
 		: lk_wood(y + piece * 0.37, x, piece, &rough);
+	/* Red Ronin: cedar stained dark, not walnut */
+	m->albedo = vmul(v3(m->albedo.x * 0.78, m->albedo.y * 0.80, m->albedo.z * 0.86), 0.80);
 	m->rough = rough;
-	m->coat = 0.55;
+	m->coat = 0.40;
 	m->metal = 0.0;
 	/* shut in: the grooves, and round the frame while it is shut */
 	double ao = 1.0;
@@ -46092,36 +46137,64 @@ static void lk_door_face(const struct lk_scene *sc, vec3 q, struct lk_mat *m)
 	double rim = fmin(fmin(x, LK_DW - x), LK_DY + LK_DH - y);
 	ao *= 1.0 - 0.55 * exp(-rim / 0.030) * (1.0 - sc->open);
 	if (what == LK_DF_GLASS) {
-		/* frosted, and the room's light coming through it */
+		/* Red Ronin: washi, the lamp inside glowing through it, its fibres */
 		double fr = room_noise(x * 380.0, y * 380.0) * 0.6 + room_noise(x * 90.0, y * 90.0) * 0.4;
-		double lamp = exp(-(lk_sq(x - 0.30) + lk_sq(y - 1.50) * 0.6) / 0.10);
-		vec3 warm = vmul(v3(1.00, 0.56, 0.22), (0.16 + 0.34 * lamp) * (0.70 + 0.55 * fr));
-		double shut = smoothstepf(0.0, 0.035, dist);
-		m->emit = vmul(warm, sc->lamp * sc->rig.glass * (0.35 + 0.65 * shut));
-		m->albedo = v3(0.015, 0.012, 0.010);
-		m->rough = 0.16 + fr * 0.10;
+		double fib = room_noise(x * 900.0, y * 70.0) * room_noise(x * 60.0, y * 1100.0);
+		double lamp = exp(-(lk_sq(x - 0.36) + lk_sq(y - 1.48) * 0.6) / 0.12);
+		vec3 warm = vmul(v3(1.00, 0.62, 0.30), (0.22 + 0.42 * lamp) * (0.82 + 0.25 * fr - 0.30 * fib));
+		double shut = smoothstepf(0.0, 0.020, dist);
+		m->emit = vmul(warm, sc->lamp * sc->rig.glass * (0.45 + 0.55 * shut));
+		m->albedo = v3(0.62, 0.58, 0.50);
+		m->rough = 0.92;
 		m->coat = 0.0;
-		ao *= 0.55 + 0.45 * shut;
+		ao *= 0.70 + 0.30 * shut;
 	}
 	m->ao = ao;
 }
 
+/* Red Ronin: the dojo's wall, where the brick was. White plaster (shikkui)
+ * above, its trowel marks faint; below, to hip height, boards of charred
+ * cedar (yakisugi) standing on end, black and crazed like a burnt log, a
+ * batten along their top; up at the lintel's height a dark beam (nageshi)
+ * running the width of the wall. what: 0 plaster, 1 charred board, 2 the
+ * seam between boards, 3 the batten, 4 the beam. */
+#define LK_KOSHI_Y 0.92     /* the boards' top */
+#define LK_BEAM_Y0 2.30     /* the beam */
+#define LK_BEAM_Y1 2.44
+
 static double lk_brick_h(double x, double y, int *id, double *edge)
 {
-	const double H = 0.075, L = 0.225, J = 0.0095;
-	double row = floor(y / H);
-	double off = ((long)row & 1) ? L * 0.5 : 0.0;
-	double col = floor((x + off) / L);
-	double bx = x + off - col * L, by = y - row * H;
-	double e = fmin(fmin(bx - J * 0.5, L - J * 0.5 - bx), fmin(by - J * 0.5, H - J * 0.5 - by));
-	e += (room_noise(x * 150.0, y * 150.0) - 0.5) * 0.0026;
-	*id = (int)col * 73 + (int)row * 1009;
-	*edge = e;
-	if (e < 0.0) {
-		return -0.0068 - room_noise(x * 320.0, y * 320.0) * 0.0014;
+	*edge = 1.0;
+	if (y > LK_BEAM_Y0 && y < LK_BEAM_Y1) {
+		double e = fmin(y - LK_BEAM_Y0, LK_BEAM_Y1 - y);
+		*id = 4;
+		*edge = e;
+		return 0.030 * smoothstepf(0.0, 0.010, e);
 	}
-	return -0.0042 * (1.0 - smoothstepf(0.0, 0.0065, e))
-		+ (room_noise(x * 64.0 + *id, y * 64.0) - 0.5) * 0.0012;
+	if (y < LK_KOSHI_Y + 0.035 && y > LK_KOSHI_Y - 0.005) {
+		double e = fmin(y - (LK_KOSHI_Y - 0.005), LK_KOSHI_Y + 0.035 - y);
+		*id = 3;
+		*edge = e;
+		return 0.016 * smoothstepf(0.0, 0.006, e);
+	}
+	if (y < LK_KOSHI_Y) {
+		const double W = 0.118;
+		double col = floor(x / W);
+		double bx = x - col * W;
+		double e = fmin(bx, W - bx);
+		*edge = e;
+		if (e < 0.003) {
+			*id = 2;
+			return -0.004;
+		}
+		*id = 1000 + (int)col;
+		/* the char: crazed into scales, each a little domed */
+		double cx = room_noise(x * 70.0 + col * 3.1, y * 26.0), cy = room_noise(x * 140.0, y * 55.0 + col);
+		return 0.0016 * (cx * 0.7 + cy * 0.3);
+	}
+	*id = 0;
+	return (room_noise(x * 9.0 + y * 3.0, y * 14.0) - 0.5) * 0.0016
+		+ (room_noise(x * 55.0, y * 40.0) - 0.5) * 0.0005;
 }
 
 static void lk_brick(vec3 p, struct lk_mat *m)
@@ -46132,26 +46205,43 @@ static void lk_brick(vec3 p, struct lk_mat *m)
 	double h0 = lk_brick_h(p.x, p.y, &id, &edge);
 	double hx = lk_brick_h(p.x + e, p.y, &i2, &e2), hy = lk_brick_h(p.x, p.y + e, &i2, &e2);
 	m->n = vnorm(v3(-(hx - h0) / e, -(hy - h0) / e, 1.0));
-	if (edge < 0.0) {
-		m->albedo = vmul(v3(0.27, 0.255, 0.235), 0.80 + 0.35 * room_noise(p.x * 200.0, p.y * 200.0));
-		m->rough = 0.95;
-		m->sub = 1;
-		m->ao = 0.70;
-	} else {
-		double s0 = room_seed(id, 21), s1 = room_seed(id, 22);
-		vec3 c = vmix(v3(0.25, 0.085, 0.050), v3(0.40, 0.165, 0.085), s0);
-		if (s1 > 0.84) {
-			c = vmul(c, 0.55);
-		}
-		c = vmul(c, 0.78 + 0.40 * room_noise(p.x * 48.0 + id, p.y * 48.0));
-		double speck = room_noise(p.x * 260.0, p.y * 260.0);
-		c = vmul(c, 1.0 - 0.45 * smoothstepf(0.78, 0.95, speck));
+	m->ao = 1.0;
+	if (id == 0) {
+		/* plaster, a warm white, darker and greyer near the boards (the rain's splash) */
+		double tr = room_noise(p.x * 6.0 + p.y * 2.0, p.y * 8.0);
+		vec3 c = vmul(v3(0.50, 0.48, 0.43), 0.92 + 0.10 * tr);
+		double splash = exp(-(p.y - LK_KOSHI_Y) / 0.25);
+		c = vmix(c, v3(0.46, 0.45, 0.42), 0.35 * splash * room_noise(p.x * 30.0, p.y * 12.0));
 		m->albedo = c;
-		m->rough = 0.82;
+		m->rough = 0.92;
 		m->sub = 0;
-		m->ao = 0.85 + 0.15 * smoothstepf(0.0, 0.010, edge);
+		/* under the beam, its shadow-line */
+		if (p.y < LK_BEAM_Y0 && p.y > LK_BEAM_Y0 - 0.06) {
+			m->ao = 0.75 + 0.25 * smoothstepf(0.0, 0.06, LK_BEAM_Y0 - p.y);
+		}
+	} else if (id == 4 || id == 3) {
+		double rough;
+		m->albedo = vmul(lk_wood(p.y * (id == 4 ? 1.0 : 3.0), p.x, 50 + id, &rough), 0.62);
+		m->rough = rough;
+		m->coat = 0.25;
+		m->sub = 1;
+	} else if (id == 2) {
+		m->albedo = v3(0.012, 0.010, 0.009);
+		m->rough = 0.95;
+		m->ao = 0.55;
+		m->sub = 1;
+	} else {
+		/* charred cedar: near black, the scales' tops catching a little silver */
+		double sc = room_noise(p.x * 70.0 + (id - 1000) * 3.1, p.y * 26.0);
+		double fine = room_noise(p.x * 400.0, p.y * 180.0);
+		vec3 c = vmul(v3(0.040, 0.034, 0.030), 0.70 + 0.55 * sc);
+		c = vadd(c, vmul(v3(0.05, 0.05, 0.055), smoothstepf(0.75, 0.95, fine) * 0.6));
+		m->albedo = c;
+		m->rough = 0.78 - 0.20 * smoothstepf(0.6, 0.9, sc);
+		m->sub = 1;
+		m->ao = 0.80 + 0.20 * smoothstepf(0.0, 0.012, edge);
 	}
-	/* the casing standing off the wall beside it */
+	/* the posts standing off the wall beside the doorway */
 	double dx = fabs(p.x) - (LK_OW + LK_CW), dy = p.y - (LK_OH + LK_CW);
 	double dc = dx > 0.0 && dy > 0.0 ? hypot(dx, dy) : fmax(dx, dy);
 	if (dc > 0.0) {
@@ -46171,10 +46261,11 @@ static double lk_casing_h(double t)
 
 static void lk_casing(const struct lk_hit *h, vec3 p, struct lk_mat *m)
 {
-	m->albedo = vmul(v3(0.60, 0.555, 0.48), 0.95 + 0.06 * room_noise(p.x * 18.0 + p.y * 2.0,
-		p.y * 260.0 + p.x * 9.0));
-	m->rough = 0.42;
-	m->coat = 0.25;
+	/* Red Ronin: the posts and lintel round the doorway, dark cedar */
+	double crough;
+	m->albedo = vmul(lk_wood(p.x * 2.0 + p.z, p.y, 60 + h->sub, &crough), 0.70);
+	m->rough = crough;
+	m->coat = 0.30;
 	m->ao = 1.0;
 	m->n = h->n;
 	if (h->face != 5) {
@@ -46211,10 +46302,11 @@ static void lk_sign_face(const struct lk_scene *sc, const struct lk_hit *h, stru
 	double sx = (gx - ga) / (du * LK_SIGN_W) * 0.0006, sy = (gy - ga) / (dv * LK_SIGN_H) * 0.0006;
 	vec3 nl = vnorm(v3(-sx, sy, 1.0));
 	m->n = lk_door_dir_out(sc, lk_sign_dir_out(nl));
-	m->albedo = vmix(m->albedo, v3(0.98, 0.74, 0.34), ga);
-	m->metal = ga;
-	m->rough = 0.42 - 0.20 * ga;
-	m->coat = 0.45 * (1.0 - ga);
+	/* Red Ronin: what was gilt is brushed in sumi */
+	m->albedo = vmix(m->albedo, v3(0.025, 0.020, 0.018), ga);
+	m->metal = 0.0;
+	m->rough = 0.62 + 0.10 * ga;
+	m->coat = 0.10;
 	m->ao = 1.0;
 	m->sub = ga > 0.5 ? 1 : 0;
 }
@@ -46222,9 +46314,11 @@ static void lk_sign_face(const struct lk_scene *sc, const struct lk_hit *h, stru
 static void lk_plate_face(const struct lk_scene *sc, const struct lk_hit *h, struct lk_mat *m)
 {
 	double x = h->q.x, y = h->q.y;
-	m->metal = 1.0;
-	m->albedo = vmul(v3(0.93, 0.70, 0.36), 0.90 + 0.10 * room_noise(x * 18.0, y * 1400.0));
-	m->rough = 0.30 + 0.10 * room_noise(x * 6.0, y * 900.0);
+	/* Red Ronin: black lacquer (urushi), deep and glossy, gold at its edge */
+	m->metal = 0.0;
+	m->albedo = vmul(v3(0.020, 0.012, 0.010), 0.90 + 0.20 * room_noise(x * 18.0, y * 300.0));
+	m->rough = 0.10 + 0.05 * room_noise(x * 6.0, y * 900.0);
+	m->coat = 0.9;
 	m->ao = 1.0;
 	vec3 nl = lk_face_n(h->face);
 	if (h->face == 5) {
@@ -46236,6 +46330,10 @@ static void lk_plate_face(const struct lk_scene *sc, const struct lk_hit *h, str
 			bool xs = fmin(x - LK_PL_X0, LK_PL_X1 - x) < fmin(y - LK_PL_Y0, LK_PL_Y1 - y);
 			nl = vnorm(v3(xs ? ex * s : 0.0, xs ? 0.0 : ey * s, 1.0));
 			m->sub = 2;
+			m->metal = 1.0;
+			m->albedo = v3(0.86, 0.64, 0.30);
+			m->rough = 0.25;
+			m->coat = 0.0;
 		}
 		if (x > LK_WIN_X0 && x < LK_WIN_X1 && y > LK_WIN_Y0 && y < LK_WIN_Y1) {
 			/* the slot: black glass, its edge going down into it */
@@ -46261,8 +46359,11 @@ static void lk_plate_face(const struct lk_scene *sc, const struct lk_hit *h, str
 			double ea;
 			lk_tex_at(&sc->plate, u, v, false, &ea);
 			if (ea > 0.02) {
-				m->albedo = vmix(m->albedo, v3(0.16, 0.10, 0.045), ea * 0.85);
-				m->rough = fmin(1.0, m->rough + ea * 0.35);
+				/* the letters in gold leaf */
+				m->albedo = vmix(m->albedo, v3(0.84, 0.62, 0.28), ea);
+				m->metal = ea;
+				m->rough = 0.28;
+				m->coat = 0.9 * (1.0 - ea);
 				m->sub = 1;
 			}
 		}
@@ -47110,6 +47211,73 @@ static void shelf_fall_paint(const struct room_render *rr, cairo_surface_t *s)
 	cairo_surface_mark_dirty(s);
 }
 
+/* Red Ronin: the noren's cotton -- indigo, a weave, soft folds -- the rod
+ * of bamboo along its top, and in the middle panel the crest in white: three
+ * commas turning in a ring (maru ni mitsudomoe). */
+static bool lk_tomoe(double x, double y, double R)
+{
+	double r = hypot(x, y);
+	if (r > R) {
+		return false;
+	}
+	if (r > R * 0.86) {
+		return true;   /* the ring */
+	}
+	double inner = R * 0.74;
+	for (int k = 0; k < 3; k++) {
+		double a = atan2(y, x) - k * 2.0 * M_PI / 3.0;
+		double cx = cos(k * 2.0 * M_PI / 3.0) * inner * 0.42, cy = sin(k * 2.0 * M_PI / 3.0) * inner * 0.42;
+		if (hypot(x - cx, y - cy) < inner * 0.30) {
+			return true;   /* a comma's head */
+		}
+		/* and its tail, sweeping round from the head and thinning */
+		double ph = fmod(a + 8.0 * M_PI, 2.0 * M_PI);
+		if (ph < 1.9) {
+			double u = ph / 1.9;
+			double rc = inner * (0.42 + 0.30 * u), w = inner * 0.30 * (1.0 - u);
+			if (fabs(r - rc) < w) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static void lk_noren(vec3 p, struct lk_mat *m)
+{
+	double x = p.x, y = p.y;
+	if (y > LK_NOREN_Y1 - 0.022) {
+		/* the rod: bamboo, a node now and then */
+		double node = fabs(fmod(x + 2.0, 0.21) - 0.105);
+		m->albedo = vmul(v3(0.42, 0.33, 0.16), node < 0.004 ? 0.6 : 0.95 + 0.1 * room_noise(x * 80.0, y * 300.0));
+		m->rough = 0.35;
+		m->coat = 0.3;
+		double c = (y - (LK_NOREN_Y1 - 0.011)) / 0.011;
+		m->n = vnorm(v3(0.0, c, sqrt(fmax(0.0, 1.0 - c * c))));
+		return;
+	}
+	/* folds: the cloth hangs in soft waves across, deeper toward the hem */
+	double hang = (LK_NOREN_Y1 - y) / (LK_NOREN_Y1 - LK_NOREN_Y0);
+	double fold = sin(x * 46.0 + sin(x * 13.0) * 1.3);
+	m->n = vnorm(v3(-cos(x * 46.0 + sin(x * 13.0) * 1.3) * 0.22 * (0.4 + 0.6 * hang), 0.0, 1.0));
+	double weave = 0.5 + 0.25 * sin(x * 2600.0) * sin(y * 2600.0) + 0.25 * room_noise(x * 400.0, y * 400.0);
+	vec3 indigo = vmul(v3(0.030, 0.050, 0.120), 0.85 + 0.25 * weave + 0.10 * fold);
+	/* faded at the hem, as indigo goes */
+	indigo = vmix(indigo, v3(0.07, 0.09, 0.15), 0.25 * smoothstepf(0.7, 1.0, hang));
+	m->albedo = indigo;
+	m->rough = 0.95;
+	m->ao = 0.85 + 0.15 * (0.5 + 0.5 * fold);
+	double cy = (LK_NOREN_Y0 + LK_NOREN_Y1) * 0.5 - 0.015;
+	if (lk_tomoe(x, y - cy, 0.085)) {
+		m->albedo = vmul(v3(0.80, 0.78, 0.72), 0.92 + 0.08 * weave);
+	}
+	/* a band of white along the hem, a little way up */
+	double band = (y - LK_NOREN_Y0) - 0.03;
+	if (band > 0.0 && band < 0.008) {
+		m->albedo = vmul(v3(0.78, 0.76, 0.70), 0.92 + 0.08 * weave);
+	}
+}
+
 static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 p, struct lk_mat *m)
 {
 	memset(m, 0, sizeof *m);
@@ -47123,10 +47291,11 @@ static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 
 	case LK_CASING:
 		lk_casing(h, p, m);
 		break;
-	case LK_JAMB:
-		m->albedo = v3(0.56, 0.52, 0.45);
-		m->rough = 0.50;
-		m->coat = 0.15;
+	case LK_JAMB: {
+		double jr;
+		m->albedo = vmul(lk_wood(p.z * 3.0 + p.x, p.y, 64, &jr), 0.75);
+		m->rough = jr;
+		m->coat = 0.2;
 		if (p.z > LK_DZ) {
 			m->ao = 1.0 - 0.50 * exp(-(p.z - LK_DZ) / 0.014) * (1.0 - sc->open);
 		} else {
@@ -47136,6 +47305,7 @@ static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 
 			m->coat = 0.0;
 		}
 		break;
+	}
 	case LK_STEP: {
 		double g = room_noise(p.x * 30.0, p.z * 30.0) * 0.6 + room_noise(p.x * 160.0, p.z * 160.0) * 0.4;
 		m->albedo = vmul(v3(0.30, 0.285, 0.265), 0.75 + 0.40 * g);
@@ -47202,10 +47372,11 @@ static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 
 	case LK_KEY: {
 		vec3 q = h->q;
 		double nz = room_noise(q.x * 900.0 + q.z * 600.0, q.y * 900.0);
-		m->metal = 1.0;
-		m->albedo = h->id == LK_KEY ? v3(0.98, 0.79, 0.44) : v3(0.92, 0.70, 0.37);
+		/* Red Ronin: black iron, the key a little brighter with handling */
+		m->metal = 0.75;
+		m->albedo = h->id == LK_KEY ? v3(0.20, 0.18, 0.16) : v3(0.075, 0.068, 0.060);
 		m->albedo = vmul(m->albedo, 0.92 + 0.10 * nz);
-		m->rough = (h->id == LK_KEY ? 0.17 : 0.22) + 0.08 * nz;
+		m->rough = (h->id == LK_KEY ? 0.28 : 0.36) + 0.08 * nz;
 		m->sub = h->id == LK_KEY ? 1 : 0;
 		break;
 	}
@@ -47218,29 +47389,40 @@ static void lk_material(const struct lk_scene *sc, const struct lk_hit *h, vec3 
 		double b0 = ax == 1 ? lo.z : lo.y, b1 = ax == 1 ? hi.z : hi.y;
 		double fe = fmin(fmin(a - a0, a1 - a), fmin(b - b0, b1 - b));
 		double mid = fabs(a - (a0 + a1) * 0.5);
-		if (fe < 0.0075 || (ax != 1 && mid < 0.0022)) {
-			m->albedo = v3(0.035, 0.032, 0.030);
-			m->metal = 0.6;
-			m->rough = 0.38;
+		/* Red Ronin: an andon -- paper on a frame of black-lacquered wood,
+		 * a bar across each face, the flame a soft brighter patch in it */
+		double bar = fabs(b - (b0 + b1) * 0.5);
+		if (fe < 0.0065 || (ax != 1 && bar < 0.0028)) {
+			m->albedo = v3(0.030, 0.018, 0.012);
+			m->metal = 0.0;
+			m->rough = 0.30;
+			m->coat = 0.6;
 			m->sub = 1;
 			break;
 		}
+		(void)mid;
 		vec3 bulb = LK_LIGHTS[1].pos;
 		double ba = ax == 0 ? bulb.z : bulb.x, bb = ax == 1 ? bulb.z : bulb.y;
 		double r2 = lk_sq(a - ba) + lk_sq(b - bb);
-		m->emit = vmul(vadd(vmul(v3(1.0, 0.50, 0.17), 0.24),
-			vmul(v3(1.0, 0.76, 0.45), 1.5 * exp(-r2 / 0.0008))), sc->rig.lantern);
-		m->albedo = v3(0.02, 0.02, 0.02);
-		m->rough = 0.10;
+		double fib = room_noise(a * 700.0, b * 60.0) * room_noise(a * 50.0, b * 800.0);
+		m->emit = vmul(vadd(vmul(v3(1.0, 0.50, 0.18), 0.30 * (0.9 - 0.4 * fib)),
+			vmul(v3(1.0, 0.70, 0.40), 0.55 * exp(-r2 / 0.004))), sc->rig.lantern);
+		m->albedo = v3(0.60, 0.55, 0.46);
+		m->rough = 0.95;
 		break;
 	}
 	case LK_IRON:
-		m->albedo = v3(0.035, 0.032, 0.030);
-		m->metal = 0.6;
-		m->rough = 0.40;
+		/* Red Ronin: the andon's cap, foot and bracket: black lacquered wood */
+		m->albedo = v3(0.030, 0.018, 0.012);
+		m->metal = 0.0;
+		m->rough = 0.30;
+		m->coat = 0.6;
 		break;
 	case LK_DECO:
 		lkd_material(sc, h, p, m);
+		break;
+	case LK_NOREN:
+		lk_noren(p, m);
 		break;
 	default:
 		m->unlit = true;
@@ -47626,15 +47808,45 @@ static bool lk_project(const struct lk_cam *c, vec3 p, double *x, double *y)
 	return true;
 }
 
+/* Red Ronin: where the password's slot is on a screen w by h with the
+ * door at rest (the login screen lays its own field over it): x, y, w, h. */
+bool desk_lock_slot_box(int w, int h, double box[4])
+{
+	struct desk_lock_look rest;
+	memset(&rest, 0, sizeof rest);
+	struct lk_cam cam;
+	lk_camera(w, h, &rest, &cam);
+	double z = LK_HZ + LK_DT + LK_PL_T;
+	double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+	for (int k = 0; k < 4; k++) {
+		vec3 p = v3((k & 1 ? LK_WIN_X1 : LK_WIN_X0) + LK_HX, k & 2 ? LK_WIN_Y1 : LK_WIN_Y0, z);
+		double x, y;
+		if (!lk_project(&cam, p, &x, &y)) {
+			return false;
+		}
+		x0 = fmin(x0, x);
+		y0 = fmin(y0, y);
+		x1 = fmax(x1, x);
+		y1 = fmax(y1, y);
+	}
+	box[0] = x0;
+	box[1] = y0;
+	box[2] = x1 - x0;
+	box[3] = y1 - y0;
+	return true;
+}
+
 static void lk_scene_for(struct lk_scene *sc, int w, int h, const struct desk_lock_look *lk)
 {
 	memset(sc, 0, sizeof *sc);
 	lk_rig_for(&lk->mood, &sc->rig);
 	lkd_dress(sc);
 	double open = clampf(lk->open, 0.0, 1.0);
+	/* slid, not swung: door still counts how open it is, for what is kept */
 	sc->door = open * LK_SWING;
-	sc->cd = cos(sc->door);
-	sc->sd = sin(sc->door);
+	sc->slide = open * (LK_DW - 0.03);
+	sc->cd = 1.0;
+	sc->sd = 0.0;
 	sc->key = -clampf(lk->turn, -0.5, 1.2) * M_PI * 0.5;
 	sc->lamp = 1.0 - 0.35 * open;
 	sc->open = open;
@@ -48033,7 +48245,8 @@ static void lk_paint_sign(cairo_t *c, cairo_t *gold, double tw, double th, const
 	cairo_surface_t *picture, bool birthday)
 {
 	fill_wood_scaled(c, 0, 0, tw, th, tw / 300.0, tw / 300.0);
-	cairo_set_source_rgba(c, 1.0, 0.88, 0.66, 0.50);
+	/* Red Ronin: a hyosatsu of pale hinoki, not a varnished board */
+	cairo_set_source_rgba(c, 0.96, 0.88, 0.74, 0.72);
 	cairo_paint(c);
 	cairo_pattern_t *sh = cairo_pattern_create_radial(tw * 0.5, th * 0.45, th * 0.2, tw * 0.5,
 		th * 0.45, tw * 0.62);
@@ -48132,8 +48345,9 @@ static void lk_paint_plate(cairo_t *c, double tw, double th)
 	double band0 = (LK_PL_Y1 - 0.0035) , band1 = LK_WIN_Y1 + 0.0035;
 	double cy = ((LK_PL_Y1 - (band0 + band1) * 0.5)) * k;
 	double bh = (band0 - band1) * k;
-	show_text_as(c, DESK_FONT_ENGRAVE, TR("PASSWORD"), tw * 0.5, cy + bh * 0.30, bh * 0.66,
-		true, 1, 1, 1, 1, 0);
+	/* Red Ronin: the word for it at a gate, and what it is under it */
+	show_text_as(c, DESK_FONT_PRINT, "\u5408\u8a00\u8449", tw * 0.5, cy + bh * 0.32,
+		bh * 0.80, true, 1, 1, 1, 1, 0);
 	for (int s = 0; s < 2; s++) {
 		double sx = s ? tw - 0.012 * k : 0.012 * k;
 		cairo_set_source_rgba(c, 1, 1, 1, 0.55);
@@ -50717,7 +50931,9 @@ void desk_draw_lock_fx(cairo_t *cr, int w, int h, const struct desk_lock_look *l
 	}
 	if (fall) {
 		pthread_once(&g_lkd_fall_once, lkd_fall_make);
-		lkfx_jack(cr, cam, clampf(lk->open, 0.0, 1.0) * LK_SWING, t, a, rig.porch);
+		if (lk->open <= 0.0) {   /* (it slides into the wall with the door) */
+			lkfx_jack(cr, cam, 0.0, t, a, rig.porch);
+		}
 	}
 	if (m->decor & DESK_DECOR_BIRTHDAY) {
 		lkfx_strings(cr, cam, t, a, night ? 0.75 : 1.0);

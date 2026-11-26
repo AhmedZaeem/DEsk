@@ -1,5 +1,17 @@
 **English** | [日本語](README.ja.md)
 
+> **This is DEsk · Red Ronin**, a fork of [fyzugx/DEsk](https://github.com/fyzugx/DEsk):
+> Hyprland-style tiling and per-screen workspaces, a Japanese night study with a storm
+> outside, a dojo's gate for the lock and login screens, and explicit sync for NVIDIA.
+> **It was edited with AI (Claude, by Anthropic)**: what changed, why, and how it was
+> checked are in [REDRONIN.md](REDRONIN.md). Install it with `./scripts/install_redronin.sh`.
+> Everything below is DEsk's own README.
+
+| | |
+|---|---|
+| ![The desk at night, lightning through the shoji window](docs/redronin/night-storm.jpg) | ![The dojo's gate: the lock and login screen](docs/redronin/dojo-gate.jpg) |
+| *Night, and lightning through the shoji window* | *The dojo's gate: the lock and login screen* |
+
 # DEsk
 
 **v0.2.1 (BETA)** -- fixes for v0.2: the Control Panel's key and lid on a slower machine and on a touch screen, the top edge of the opened lid, and the drawer's sounds in time with the drawer. v0.2 brought new things to the desk: a calculator, one notebook to type and write in, Print as a camera that also films, and picture-in-picture as an old phone; touch, an on-screen typewriter, a pen and handwriting, and a screen that turns with the machine; the Control Panel redesigned in four; woods, stains and desk mats; favourites, a clipboard and looks for the drawer. See [RELEASE-NOTES.md](RELEASE-NOTES.md).

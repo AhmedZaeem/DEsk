@@ -210,8 +210,8 @@ static const char *SCALE_VALS[] = { "auto", "1", "1.25", "1.5", "2", NULL };
 static const char *const GFX_WORDS[] = { "Ultra", "High", "Medium", "Low", "2D Fallback", NULL };
 static const char *const GFX_VALS[] = { "ultra", "high", "medium", "low", "2d" };
 #define GFX_2D 4
-static const char *const MOTION_WORDS[] = { "Brisk", "Normal", "Gentle", NULL };
-static const char *const MOTION_VALS[] = { "brisk", "normal", "gentle" };
+static const char *const MOTION_WORDS[] = { "Swift", "Brisk", "Normal", "Gentle", NULL };
+static const char *const MOTION_VALS[] = { "swift", "brisk", "normal", "gentle" };
 static const char *const BOUNCE_WORDS[] = { "Normal", "Low", "None", NULL };
 /* (2026-11-12, the owner: 夜間モードの強さを選べるように) */
 static const char *const NIGHT_WORDS[] = { "night|Light", "night|Normal", "night|Strong",
@@ -267,6 +267,9 @@ static const char *const LANG_VALS[] = { "auto", "en", "ja", "zh", "ko", "es", "
 static const char *const SCREEN_OFF_WORDS[] = { "Never", "1 min", "2 min", "5 min", "10 min",
 	"15 min", "30 min", NULL };
 static const char *const SCREEN_OFF_VALS[] = { "never", "1", "2", "5", "10", "15", "30" };
+static const char *const PLUGGED_OFF_WORDS[] = { "Never", "As on battery", "5 min", "10 min",
+	"15 min", "30 min", "60 min", NULL };
+static const char *const PLUGGED_OFF_VALS[] = { "never", "same", "5", "10", "15", "30", "60" };
 /* The drawer's terminal (app.terminal): the programs filed as a terminal,
  * each by its name, found where the desk finds programs (terminals_find);
  * Automatic, the first of DEsk's usual ones that is installed (apps.c);
@@ -379,7 +382,7 @@ static const struct setting SETTINGS[] = {
 		"plain. The room is traced again for it, which takes a moment.",
 		GFX_WORDS, GFX_VALS, 1, NULL },
 	{ S_CHOICE, "motion", "Motion", "How long everything that moves takes.",
-		MOTION_WORDS, MOTION_VALS, 1, NULL },
+		MOTION_WORDS, MOTION_VALS, 2, NULL },
 	{ S_CHOICE, "camera_bounce", "Camera bounce",
 		"How far the view swings past what you turn to look at and settles back, and how "
 		"the head bobs walking to the front door. Lower it, or turn it off, if it makes you "
@@ -444,6 +447,9 @@ static const struct setting SETTINGS[] = {
 	{ S_CHOICE, "screen_off", "Turn the screen off when the desk is left",
 		"After this long without a key or the pointer, the screen goes dark; either brings "
 		"it back.", SCREEN_OFF_WORDS, SCREEN_OFF_VALS, 4, NULL },
+	{ S_CHOICE, "screen_off_plugged", "And while it is plugged in",
+		"On the mains the screen can stay lit, and the desk unlocked, for as long as you like; "
+		"pulled out, the wait above counts again.", PLUGGED_OFF_WORDS, PLUGGED_OFF_VALS, 0, NULL },
 	{ S_CHECK, "lock_on_screen_off", "Lock the desk when the screen goes off",
 		"The desk is then behind the front door, and your password lets you back in. Off, a "
 		"key or the pointer is enough.", NULL, NULL, 1, NULL },
@@ -1224,6 +1230,7 @@ static bool conf_write(const char *path, const char *key, const char *value)
 			"#   lights_at_login = yes | no         the room starts dark, the lamp comes up\n"
 			"#   screen_off = never | 1 | 2 | 5 | 10 | 15 | 30\n"
 			"#                                      minutes left alone before it goes dark\n"
+			"#   screen_off_plugged = never | same | minutes  the same on the mains\n"
 			"#   lock_on_screen_off = yes | no      and the desk locks when it does\n"
 			"#   tap_to_click = yes | no            a touchpad: a tap is a click\n"
 			"#   natural_scrolling = yes | no       a touchpad: the page follows the fingers\n"

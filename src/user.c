@@ -16,6 +16,14 @@
 
 void desk_lock_user(char *login, size_t nl, char *name, size_t nn)
 {
+	/* Red Ronin: a name given for a picture made to be shared (the login
+	 * screen shipped with the release), so it is nobody's own */
+	const char *given = getenv("DESK_LOCK_NAME");
+	if (given && *given) {
+		snprintf(login, nl, "%s", given);
+		snprintf(name, nn, "%s", given);
+		return;
+	}
 	struct passwd *pw = getpwuid(getuid());
 	const char *l = pw && pw->pw_name ? pw->pw_name : getenv("USER");
 	snprintf(login, nl, "%s", l ? l : "");
@@ -78,6 +86,9 @@ cairo_surface_t *desk_lock_picture(void)
 	char login[64], name[128];
 	desk_lock_user(login, sizeof login, name, sizeof name);
 	snprintf(c, sizeof c, "/var/lib/AccountsService/icons/%s", login);
+	if (getenv("DESK_LOCK_NAME") && *getenv("DESK_LOCK_NAME")) {
+		c[0] = '\0';   /* (nobody's account: nobody's picture either) */
+	}
 	cands[2] = c;
 	for (int i = 0; i < 3; i++) {
 		if (!cands[i] || access(cands[i], R_OK) != 0) {

@@ -21,9 +21,14 @@ Each round of changes was checked before it was installed:
   the unit tests;
 - where a test DEsk could run, its look was checked from screenshots.
 
+**It is used every day on real hardware.** The maintainer runs DEsk Red Ronin as their desktop
+on an Arch Linux laptop with an NVIDIA RTX A5000 and NVIDIA's proprietary driver, on two or three
+screens. Everything listed below, including explicit sync, the storm, the 3D workspace changes
+and the tiling, works there.
+
 Nothing here has had a human code review line by line. Read it as you would any code an AI
-wrote: it works on the machine it was made on (Arch Linux, an NVIDIA RTX A5000 laptop, two
-or three screens), and it has been tested, but it has not been proven everywhere.
+wrote: it is tested and in daily use, but on one kind of machine. It has not been proven on
+every GPU and setup.
 
 ## What was changed, and why
 
@@ -119,9 +124,15 @@ from `packaging/redronin/arch/PKGBUILD` and the AUR's `calamares`.
 4. The installed system boots through GRUB to the dojo's gate.
 5. Logging in reaches the desk.
 
-**Not tested:** real hardware, NVIDIA's proprietary driver (the ISO uses the open drivers),
-BIOS (non-UEFI) installs, and installs next to another system. A virtual machine has no 3D,
-so DEsk draws in 2D there: no storm, no 3D workspace changes.
+The desk itself runs daily on real hardware (see above). **The ISO's own route has not yet been
+tried on real hardware:**
+- booting the live image from a USB stick, and installing with Calamares onto a physical disk;
+- BIOS (non-UEFI) installs, and installs next to another system.
+
+The ISO also ships the open graphics drivers, not NVIDIA's proprietary one. On an NVIDIA machine
+the live session runs on nouveau, which is untested; install the `nvidia` driver afterwards for
+the setup that is tested. A virtual machine has no 3D, so DEsk draws in 2D there: no storm,
+no 3D workspace changes.
 
 ### On an Arch Linux you already have
 

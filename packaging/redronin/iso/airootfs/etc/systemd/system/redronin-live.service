@@ -1,0 +1,12 @@
+[Unit]
+Description=Red Ronin live session user
+Before=display-manager.service
+After=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/redronin-live-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

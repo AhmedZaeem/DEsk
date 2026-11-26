@@ -1,0 +1,31 @@
+---
+componentName: redronin
+welcomeStyleCalamares: false
+welcomeExpandingLogo: true
+windowExpanding: normal
+windowSize: 900px,620px
+windowPlacement: center
+sidebar: widget
+navigation: widget
+strings:
+    productName:         "Red Ronin"
+    shortProductName:    "Red Ronin"
+    version:             "0.2.1-redronin.1"
+    shortVersion:        "0.2.1"
+    versionedName:       "Red Ronin 0.2.1"
+    shortVersionedName:  "Red Ronin 0.2.1"
+    bootloaderEntryName: "Red Ronin"
+    productUrl:          "https://github.com/AhmedZaeem/DEsk"
+    supportUrl:          "https://github.com/AhmedZaeem/DEsk/issues"
+    knownIssuesUrl:      "https://github.com/AhmedZaeem/DEsk/blob/redronin/REDRONIN.md#known-gaps"
+images:
+    productLogo:         "logo.png"
+    productIcon:         "logo.png"
+    productWelcome:      "welcome.png"
+slideshow:               "show.qml"
+slideshowAPI: 2
+style:
+   SidebarBackground:        "#140c0a"
+   SidebarText:              "#efe6d2"
+   SidebarTextCurrent:       "#ffffff"
+   SidebarBackgroundCurrent: "#7a0c10"

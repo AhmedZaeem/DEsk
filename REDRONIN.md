@@ -98,7 +98,34 @@ or three screens), and it has been tested, but it has not been proven everywhere
 
 ## Installing
 
-On Arch Linux, from the release (or a clone of the `redronin` branch):
+### The ISO: a whole system
+
+The release has an ISO, `redronin-*.iso`, built on Arch Linux's own install medium:
+- It boots into a live DEsk Red Ronin, logged in as `ronin` with no password.
+- **Install Red Ronin** in the drawer runs the **Calamares** installer. It asks for your
+  language, keyboard and disk, and the user to make. Then it copies the live system to the
+  disk, installs GRUB for UEFI, and removes the live-only pieces.
+
+![The installer](docs/redronin/installer.jpg)
+
+Write it to a USB stick (`sudo dd if=redronin-*.iso of=/dev/sdX bs=4M status=progress`, or
+Ventoy, Balena Etcher, Rufus) and boot from it. It's made by `packaging/redronin/iso/build-iso.sh`
+from `packaging/redronin/arch/PKGBUILD` and the AUR's `calamares`.
+
+**Tested in a QEMU virtual machine (UEFI, a blank 30 GB disk):**
+1. It boots to the live desk.
+2. The installer opens from the drawer.
+3. It erases the disk and installs; this needed one fix, now in the ISO.
+4. The installed system boots through GRUB to the dojo's gate.
+5. Logging in reaches the desk.
+
+**Not tested:** real hardware, NVIDIA's proprietary driver (the ISO uses the open drivers),
+BIOS (non-UEFI) installs, and installs next to another system. A virtual machine has no 3D,
+so DEsk draws in 2D there: no storm, no 3D workspace changes.
+
+### On an Arch Linux you already have
+
+From the release (or a clone of the `redronin` branch):
 
 ```sh
 tar xf DEsk-redronin-*.tar.gz && cd DEsk-redronin-*

@@ -1,0 +1,85 @@
+# DEsk · Red Ronin, packaged for Arch Linux (and the Red Ronin ISO).
+#
+# DEsk, with wlroots 0.18.3 built in /opt/desk-wlroots (Red Ronin's
+# explicit-sync patch applied: see packaging/redronin/), where only DEsk looks
+# for it -- as scripts/install_arch.sh does, but as a package.
+# Red Ronin's settings, the dojo login theme and the drawer look go with it,
+# under /usr/share.
+#
+# Edited with AI (Claude, by Anthropic): see REDRONIN.md.
+
+pkgname=desk-redronin
+pkgver=0.2.1.redronin.1
+_tag=0.2.1-redronin.1
+pkgrel=1
+pkgdesc="DEsk, a skeuomorphic Wayland desktop -- Red Ronin: a Japanese night study with Hyprland-style tiling"
+arch=(x86_64)
+url="https://github.com/AhmedZaeem/DEsk"
+license=(MIT)
+depends=(wayland libxkbcommon libinput cairo pango gtk3 pixman fontconfig freetype2 libdrm
+	libglvnd mesa systemd-libs libpulse pam libxcb xcb-util-wm seatd libdisplay-info hwdata
+	libx11 xcb-util-renderutil xorg-xwayland dbus xdg-desktop-portal xdg-desktop-portal-gtk
+	xdg-desktop-portal-wlr zenity wireplumber noto-fonts noto-fonts-cjk noto-fonts-emoji
+	gsfonts grim ffmpeg slurp wl-clipboard libnotify xdg-user-dirs xdg-utils librsvg curl)
+makedepends=(meson ninja pkgconf python python-cairo wayland-protocols glslang)
+optdepends=('fuzzel: the launcher on Super+D and a lone Super tap, and the power menu'
+	'kitty: the terminal Red Ronin binds'
+	'sddm: the dojo login theme (red-ronin-dojo)'
+	'qt6-declarative: the dojo login theme')
+provides=(desk)
+conflicts=(desk desk-git)
+backup=()
+source=("DEsk-redronin-${_tag}.tar.gz::https://github.com/AhmedZaeem/DEsk/releases/download/v${_tag}/DEsk-redronin-${_tag}.tar.gz"
+	"https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/0.18.3/downloads/wlroots-0.18.3.tar.gz")
+sha256sums=('5d3cad05f4be3131b2f8c65f0e442e7d55cea578dff6e245c0adad8b2d8531de'
+	'164a7c8bf9f8ae2c1fb00e7bddb6f08cad7e81b3eb35577b48483b1ac265a087')
+
+_wlr=/opt/desk-wlroots
+
+prepare() {
+	cd wlroots-0.18.3
+	patch -p1 < "$srcdir/DEsk-redronin-${_tag}/packaging/redronin/wlroots-0.18.3-explicit-sync.patch"
+}
+
+build() {
+	# wlroots, for /opt/desk-wlroots; staged here for DEsk to be built against
+	arch-meson wlroots-0.18.3 build-wlroots --prefix="$_wlr" --libdir=lib \
+		-Dexamples=false -Dwerror=false -Dbackends=drm,libinput,x11 -Drenderers=gles2 \
+		-Dallocators=gbm -Dsession=enabled -Dxwayland=enabled -Dlibliftoff=disabled \
+		-Dcolor-management=disabled -Dxcb-errors=disabled -Dicon_directory=/usr/share/icons \
+		-Dc_link_args="-Wl,-rpath,$_wlr/lib"
+	meson compile -C build-wlroots
+	DESTDIR="$srcdir/stage" meson install -C build-wlroots --no-rebuild --quiet
+	# its pkg-config file pointed at the stage while DEsk is built
+	mkdir -p "$srcdir/pc"
+	sed "s|^prefix=.*|prefix=$srcdir/stage$_wlr|" "$srcdir/stage$_wlr/lib/pkgconfig/wlroots-0.18.pc" \
+		> "$srcdir/pc/wlroots-0.18.pc"
+
+	arch-meson "DEsk-redronin-${_tag}" build-desk \
+		-Dpkg_config_path="$srcdir/pc" -Dc_link_args="-Wl,-rpath,$_wlr/lib"
+	meson compile -C build-desk
+}
+
+check() {
+	meson test -C build-desk --print-errorlogs
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install -C build-wlroots --no-rebuild --quiet
+	DESTDIR="$pkgdir" meson install -C build-desk --no-rebuild --quiet
+	# (wlroots' headers and pkg-config file are DEsk's business only)
+	rm -rf "$pkgdir$_wlr/include" "$pkgdir$_wlr/lib/pkgconfig"
+
+	local src="$srcdir/DEsk-redronin-${_tag}"
+	# Red Ronin's settings, to be copied into ~/.config/desk (the ISO puts them in /etc/skel)
+	install -Dm644 "$src/packaging/redronin/shell.conf" "$pkgdir/usr/share/desk/redronin/shell.conf"
+	install -Dm644 "$src/packaging/redronin/fuzzel.ini" "$pkgdir/usr/share/desk/redronin/fuzzel.ini"
+	# the dojo login theme
+	install -d "$pkgdir/usr/share/sddm/themes"
+	cp -r "$src/packaging/redronin/sddm/red-ronin-dojo" "$pkgdir/usr/share/sddm/themes/"
+	# Android Studio's look in the drawer: drawn here
+	python "$src/art/looks/android_netsuke.py" "$pkgdir/usr/share/desk/looks/android-netsuke" >/dev/null \
+		|| true
+	install -Dm644 "$src/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 "$src/REDRONIN.md" "$pkgdir/usr/share/doc/$pkgname/REDRONIN.md"
+}

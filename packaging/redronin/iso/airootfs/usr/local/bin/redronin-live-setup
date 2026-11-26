@@ -1,0 +1,17 @@
+#!/bin/sh
+# The live session's user, made at boot (so it is not in what the installer copies):
+# ronin, no password, sudo without one, logged straight into DEsk, the
+# installer in its drawer.
+set -e
+id ronin >/dev/null 2>&1 || useradd -m -G wheel,audio,video,input,network,storage -s /bin/bash ronin
+passwd -d ronin >/dev/null
+echo 'ronin ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/10-redronin-live
+chmod 440 /etc/sudoers.d/10-redronin-live
+mkdir -p /etc/sddm.conf.d
+printf '[Autologin]\nUser=ronin\nSession=desk\nRelogin=false\n' > /etc/sddm.conf.d/20-redronin-live.conf
+d=/home/ronin/.config/desk
+mkdir -p "$d"
+printf 'thing terminal\nthing browser\nthing files\nthing editor\napp redronin-install.desktop\napp android-studio.desktop\ncalculator\nkeyboard\nnotebook\ncamera\npanel\n' > "$d/drawer"
+# (the live session never goes dark or locks: nobody installing is to be shut out)
+printf '\nscreen_off = never\nscreen_off_plugged = never\nlock_on_screen_off = no\n' >> "$d/shell.conf"
+chown -R ronin: /home/ronin

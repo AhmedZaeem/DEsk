@@ -1,0 +1,3 @@
+#!/bin/sh
+# Install Red Ronin: Calamares, as root, on the live desk
+exec sudo -E env QT_QPA_PLATFORM=wayland calamares -d >/tmp/calamares.log 2>&1

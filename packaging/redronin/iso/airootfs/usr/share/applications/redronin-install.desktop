@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Install Red Ronin
+Name[ja]=赤浪人をインストール
+Comment=Install this system on the disk
+Exec=redronin-install
+Icon=calamares
+Terminal=false
+Categories=System;
